@@ -197,8 +197,8 @@ process_stream({ReqId, done}, ReqId, State=#state{req_id=ReqId,
     %% Only add the continuation if there (may) be more results to send
     #rpbindexreq{max_results=MaxResults} = Req,
     Resp = case is_integer(MaxResults) andalso Count >= MaxResults of
-               true -> #rpbindexresp{done=1, continuation=Continuation};
-               false -> #rpbindexresp{done=1}
+               true -> #rpbindexresp{done=true, continuation=Continuation};
+               false -> #rpbindexresp{done=true}
            end,
     {done, Resp, State};
 process_stream({ReqId, {results, []}}, ReqId, State=#state{req_id=ReqId}) ->

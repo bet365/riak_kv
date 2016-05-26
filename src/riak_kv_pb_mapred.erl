@@ -117,13 +117,13 @@ process_stream(#kv_mrc_sink{ref=ReqId,
                 {ok, Msgs} ->
                     if Done ->
                             cleanup_pipe(PipeCtx),
-                            %% we could set the done=1 flag on the
+                            %% we could set the done=true flag on the
                             %% final results message, but that has
                             %% never been done, so there are probably
                             %% client libs that aren't expecting it;
                             %% play it safe for now
                             {done,
-                             Msgs++[#rpbmapredresp{done=1}],
+                             Msgs++[#rpbmapredresp{done=true}],
                              clear_state_req(State)};
                        true ->
                             {Sink, _} = Mrc#mrc_ctx.sink,

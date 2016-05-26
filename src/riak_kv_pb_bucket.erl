@@ -124,7 +124,7 @@ process(#rpblistkeysreq{type = Type, bucket=B,timeout=T}=Req, #state{client=C} =
 %% streaming buckets.
 process_stream({ReqId, done}, ReqId,
                State=#state{req=#rpblistkeysreq{}, req_ctx=ReqId}) ->
-    {done, #rpblistkeysresp{done = 1}, State};
+    {done, #rpblistkeysresp{done = true}, State};
 process_stream({ReqId, From, {keys, []}}, ReqId,
                State=#state{req=#rpblistkeysreq{}, req_ctx=ReqId}) ->
     _ = riak_kv_keys_fsm:ack_keys(From),
@@ -148,7 +148,7 @@ process_stream({ReqId, Error}, ReqId,
 %% list buckets clauses.
 process_stream({ReqId, done}, ReqId,
                State=#state{req=#rpblistbucketsreq{}, req_ctx=ReqId}) ->
-    {done, #rpblistbucketsresp{done = 1}, State};
+    {done, #rpblistbucketsresp{done = true}, State};
 process_stream({ReqId, {buckets_stream, []}}, ReqId,
                State=#state{req=#rpblistbucketsreq{}, req_ctx=ReqId}) ->
     {ignore, State};

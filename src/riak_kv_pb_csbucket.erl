@@ -98,8 +98,8 @@ process_stream({ReqId, done}, ReqId, State=#state{req_id=ReqId,
     %% Only add the continuation if there may be more results to send
     #rpbcsbucketreq{max_results=MaxResults} = Req,
     Resp = case is_integer(MaxResults) andalso Count >= MaxResults of
-               true -> #rpbcsbucketresp{done=1, continuation=Continuation};
-               false -> #rpbcsbucketresp{done=1}
+               true -> #rpbcsbucketresp{done=true, continuation=Continuation};
+               false -> #rpbcsbucketresp{done=true}
            end,
     {done, Resp, State};
 process_stream({ReqId, {results, []}}, ReqId, State=#state{req_id=ReqId}) ->
