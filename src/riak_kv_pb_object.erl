@@ -382,7 +382,7 @@ bucket_type(T, B) ->
 -ifdef(TEST).
 
 -define(CODE(Msg), riak_pb_codec:msg_code(Msg)).
--define(PAYLOAD(Msg), riak_kv_pb:encode(Msg)).
+-define(PAYLOAD(Msg), riak_kv_pb:encode_msg(Msg)).
 
 empty_bucket_key_test_() ->
     Name = "empty_bucket_key_test",
