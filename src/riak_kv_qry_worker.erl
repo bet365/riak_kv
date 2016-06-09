@@ -49,12 +49,16 @@
 -define(NO_MAX_RESULTS, no_max_results).
 -define(NO_PG_SORT, undefined).
 
+-record(chunk, {
+          storage_handle
+         }.
+
 -record(state, {
           qry           = none                :: none | ?SQL_SELECT{},
           qid           = undefined           :: undefined | {node(), non_neg_integer()},
           sub_qrys      = []                  :: [integer()],
           receiver_pid                        :: pid(),
-          result        = []                  :: [{non_neg_integer(), list()}] | [{binary(), term()}],
+          result        = []                  :: [{non_neg_integer(), #chunk{}}] | [{binary(), term()}],
           run_sub_qs_fn = fun run_sub_qs_fn/1 :: fun()
          }).
 

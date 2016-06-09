@@ -22,7 +22,7 @@
 %% -------------------------------------------------------------------
 -module(riak_kv_qry_compiler).
 
--export([compile/3]).
+-export([compile/2]).
 -export([finalise_aggregate/2]).
 -export([run_select/2, run_select/3]).
 
@@ -54,18 +54,18 @@
 
 %% 3rd argument is undefined if we should not be concerned about the
 %% maximum number of quanta
--spec compile(?DDL{}, ?SQL_SELECT{}, 'undefined'|pos_integer()) ->
+-spec compile(?DDL{}, ?SQL_SELECT{}) ->
     {ok, [?SQL_SELECT{}]} | {error, any()}.
-compile(?DDL{}, ?SQL_SELECT{is_executable = true}, _MaxSubQueries) ->
+compile(?DDL{}, ?SQL_SELECT{is_executable = true}) ->
     {error, 'query is already compiled'};
 compile(?DDL{} = DDL,
-        ?SQL_SELECT{is_executable = false, 'SELECT' = Sel} = Q, MaxSubQueries) ->
+        ?SQL_SELECT{is_executable = false, 'SELECT' = Sel} = Q) ->
     if Sel#riak_sel_clause_v1.clause == [] ->
             {error, 'full table scan not implemented'};
         el/=se ->
             case compile_select_clause(DDL, Q) of
                 {ok, S} ->
-                    compile_where_clause(DDL, Q?SQL_SELECT{'SELECT' = S}, MaxSubQueries);
+                    compile_where_clause(DDL, Q?SQL_SELECT{'SELECT' = S});
                 {error, _} = Error ->
                     Error
             end
@@ -77,8 +77,7 @@ compile(?DDL{} = DDL,
 compile_where_clause(?DDL{} = DDL,
                      ?SQL_SELECT{is_executable = false,
                                  'WHERE'       = W,
-                                 cover_context = Cover} = Q,
-                     MaxSubQueries) ->
+                                 cover_context = Cover} = Q) ->
     case {compile_where(DDL, W), unwrap_cover(Cover)} of
         {{error, E}, _} ->
             {error, E};
@@ -86,15 +85,13 @@ compile_where_clause(?DDL{} = DDL,
             {error, E};
         {NewW, {ok, {RealCover, WhereModifications}}} ->
             expand_query(DDL, Q?SQL_SELECT{cover_context = RealCover},
-                         update_where_for_cover(NewW, WhereModifications),
-                         MaxSubQueries)
+                         update_where_for_cover(NewW, WhereModifications))
     end.
 
 %% now break out the query on quantum boundaries
 expand_query(?DDL{local_key = LK, partition_key = PK},
-             ?SQL_SELECT{} = Q1, Where1,
-             MaxSubQueries) ->
-    case expand_where(Where1, PK, MaxSubQueries) of
+             ?SQL_SELECT{} = Q1, Where1) ->
+    case expand_where(Where1, PK) of
         {error, E} ->
             {error, E};
         Where2 ->
@@ -468,12 +465,12 @@ col_index_and_type_of(Fields, ColumnName) ->
     end.
 
 %%
--spec expand_where(riak_ql_ddl:filter(), #key_v1{}, integer()) ->
+-spec expand_where(riak_ql_ddl:filter(), #key_v1{}) ->
         [where_props()] | {error, any()}.
-expand_where(Where, PartitionKey, MaxSubQueries) ->
+expand_where(Where, PartitionKey) ->
     case find_quantum_field_index_in_key(PartitionKey) of
         {QField, QSize, QUnit, QIndex} ->
-            hash_timestamp_to_quanta(QField, QSize, QUnit, QIndex, MaxSubQueries, Where);
+            hash_timestamp_to_quanta(QField, QSize, QUnit, QIndex, Where);
         notfound ->
             [Where]
     end.
@@ -496,7 +493,7 @@ find_quantum_field_index_in_key2([_|Tail], Index) ->
     find_quantum_field_index_in_key2(Tail, Index+1).
 
 %%
-hash_timestamp_to_quanta(QField, QSize, QUnit, QIndex, MaxSubQueries, Where1) ->
+hash_timestamp_to_quanta(QField, QSize, QUnit, QIndex, Where1) ->
     GetMaxMinFun = fun({startkey, List}, {_S, E}) ->
                            {element(3, lists:nth(QIndex, List)), E};
                       ({endkey,   List}, {S, _E}) ->
@@ -527,14 +524,9 @@ hash_timestamp_to_quanta(QField, QSize, QUnit, QIndex, MaxSubQueries, Where1) ->
         end,
     {NoSubQueries, Boundaries} =
         riak_ql_quanta:quanta(Min2, Max2, QSize, QUnit),
-    if
-        MaxSubQueries == undefined orelse NoSubQueries =< MaxSubQueries ->
-            %% use the maximum value that has not been incremented, we still use
-            %% the end_inclusive flag because the end key is not used to hash
-            make_wheres(Where2, QField, Min2, Max1, Boundaries);
-        NoSubQueries > MaxSubQueries ->
-            {error, {too_many_subqueries, ?E_TOO_MANY_SUBQUERIES(NoSubQueries)}}
-    end.
+    %% use the maximum value that has not been incremented, we still use
+    %% the end_inclusive flag because the end key is not used to hash
+    make_wheres(Where2, QField, Min2, Max1, Boundaries).
 
 make_wheres(Where, QField, Min, Max, Boundaries) ->
     {HeadOption, TailOption, NewWhere} = extract_options(Where),
