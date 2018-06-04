@@ -21,7 +21,7 @@
 %% -------------------------------------------------------------------
 -module(riak_kv_put_core).
 -export([init/8, add_result/2, enough/1, response/1,
-         final/1, result_shortcode/1, result_idx/1]).
+         final/1, result_shortcode/1, result_idx/1, result_code/1]).
 -export_type([putcore/0, result/0, reply/0]).
 
 -ifdef(TEST).
@@ -197,6 +197,10 @@ result_shortcode({dw, _, _})    -> 2;
 result_shortcode({dw, _, _, _}) -> 2;
 result_shortcode({fail, _, _})  -> -1;
 result_shortcode(_)             -> -2.
+
+result_code({X, _, _})          -> X.
+result_code({X, _, _, _})        -> X.
+result_code(_)                   -> na.
 
 result_idx({_, Idx, _})    -> Idx;
 result_idx({_, Idx, _, _}) -> Idx;

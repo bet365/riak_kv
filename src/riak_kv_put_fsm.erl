@@ -111,7 +111,8 @@
                 trace = false :: boolean(), 
                 tracked_bucket=false :: boolean(), %% track per bucket stats
                 bad_coordinators = [] :: [atom()],
-                coordinator_timeout :: integer()
+                coordinator_timeout :: integer(),
+                start_time_send_to_vnodes :: {integer(), integer(), integer()}
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -238,7 +239,8 @@ init([From, RObj, Options0]) ->
                        trace = Trace,
                        options = Options,
                        timing = riak_kv_fsm_timing:add_timing(prepare, []),
-                       coordinator_timeout=CoordTimeout},
+                       coordinator_timeout=CoordTimeout,
+                       start_time_send_to_vnodes = -1},
     case Trace of
         true ->
             riak_core_dtrace:put_tag([Bucket, $,, Key]),
@@ -601,7 +603,7 @@ execute_remote(StateData=#state{robj=RObj, req_id = ReqId,
                                 starttime = StartTime}) ->
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2,
                              IndexNode /= CoordPLEntry],
-    StateData1 = 
+    StateData0 =
         case Trace of
             true ->
                 Ps = [[atom2list(Nd), $,, integer_to_list(Idx)] ||
@@ -611,6 +613,8 @@ execute_remote(StateData=#state{robj=RObj, req_id = ReqId,
             _ ->
                 StateData
         end,
+
+    StateData1 = StateData0#state{start_time_send_to_vnodes = os:timestamp()},
     riak_kv_vnode:put(Preflist, BKey, RObj, ReqId, StartTime, VnodeOptions),
     case riak_kv_put_core:enough(PutCore) of
         true ->
@@ -626,16 +630,22 @@ waiting_remote_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     ?DTRACE(Trace, ?C_PUT_FSM_WAITING_REMOTE_VNODE, [-1], []),
     process_reply({error,timeout}, StateData);
 waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
-                                                trace = Trace}) ->
+                                                trace = Trace,
+                                                start_time_send_to_vnodes = T0}) ->
+
+    T1 = os:timestamp(),
+    Idx = riak_kv_put_core:result_idx(Result),
     case Trace of
         true ->
+            IdxStr = integer_to_list(Idx),
             ShortCode = riak_kv_put_core:result_shortcode(Result),
-            IdxStr = integer_to_list(riak_kv_put_core:result_idx(Result)),
             ?DTRACE(?C_PUT_FSM_WAITING_REMOTE_VNODE, [ShortCode], [IdxStr]);
         _ ->
             ok
     end,
     UpdPutCore1 = riak_kv_put_core:add_result(Result, PutCore),
+    ResultCode = riak_kv_put_core:result_code(Result),
+    riak_core_optimised_apl:update_responsiveness_measurement(ResultCode, Idx, T0, T1),
     case riak_kv_put_core:enough(UpdPutCore1) of
         true ->
             {Reply, UpdPutCore2} = riak_kv_put_core:response(UpdPutCore1),
@@ -700,17 +710,23 @@ finish(timeout, StateData = #state{timing = Timing, reply = Reply,
     end,
     {stop, normal, StateData};
 finish(Reply, StateData = #state{putcore = PutCore,
-                                 trace = Trace}) ->
+                                 trace = Trace,
+                                 start_time_send_to_vnodes = T0}) ->
+
+    T1 = os:timestamp(),
+    Idx = riak_kv_put_core:result_idx(Reply),
     case Trace of
         true ->
+            IdxStr = integer_to_list(Idx),
             ShortCode = riak_kv_put_core:result_shortcode(Reply),
-            IdxStr = integer_to_list(riak_kv_put_core:result_idx(Reply)),
             ?DTRACE(?C_PUT_FSM_FINISH, [1, ShortCode], [IdxStr]);
         _ ->
             ok
     end,
     %% late responses - add to state.  *Does not* recompute finalobj
     UpdPutCore = riak_kv_put_core:add_result(Reply, PutCore),
+    ResultCode = riak_kv_put_core:result_code(Reply),
+    riak_core_optimised_apl:update_responsiveness_measurement(ResultCode, Idx, T0, T1),
     {next_state, finish, StateData#state{putcore = UpdPutCore}, 0}.
 
 
