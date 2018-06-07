@@ -198,10 +198,6 @@ result_shortcode({dw, _, _, _}) -> 2;
 result_shortcode({fail, _, _})  -> -1;
 result_shortcode(_)             -> -2.
 
-result_code({X, _, _})          -> X.
-result_code({X, _, _, _})        -> X.
-result_code(_)                   -> na.
-
 result_idx({_, Idx, _})    -> Idx;
 result_idx({_, Idx, _, _}) -> Idx;
 result_idx(_)              -> -1.

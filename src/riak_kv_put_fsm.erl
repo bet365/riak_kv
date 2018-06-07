@@ -635,17 +635,16 @@ waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
 
     T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Result),
+    ShortCode = riak_kv_put_core:result_shortcode(Result),
     case Trace of
         true ->
             IdxStr = integer_to_list(Idx),
-            ShortCode = riak_kv_put_core:result_shortcode(Result),
             ?DTRACE(?C_PUT_FSM_WAITING_REMOTE_VNODE, [ShortCode], [IdxStr]);
         _ ->
             ok
     end,
     UpdPutCore1 = riak_kv_put_core:add_result(Result, PutCore),
-    ResultCode = riak_kv_put_core:result_code(Result),
-    riak_core_optimised_apl:update_responsiveness_measurement(ResultCode, Idx, T0, T1),
+    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     case riak_kv_put_core:enough(UpdPutCore1) of
         true ->
             {Reply, UpdPutCore2} = riak_kv_put_core:response(UpdPutCore1),
@@ -715,18 +714,17 @@ finish(Reply, StateData = #state{putcore = PutCore,
 
     T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Reply),
+    ShortCode = riak_kv_put_core:result_shortcode(Reply),
     case Trace of
         true ->
             IdxStr = integer_to_list(Idx),
-            ShortCode = riak_kv_put_core:result_shortcode(Reply),
             ?DTRACE(?C_PUT_FSM_FINISH, [1, ShortCode], [IdxStr]);
         _ ->
             ok
     end,
     %% late responses - add to state.  *Does not* recompute finalobj
     UpdPutCore = riak_kv_put_core:add_result(Reply, PutCore),
-    ResultCode = riak_kv_put_core:result_code(Reply),
-    riak_core_optimised_apl:update_responsiveness_measurement(ResultCode, Idx, T0, T1),
+    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     {next_state, finish, StateData#state{putcore = UpdPutCore}, 0}.
 
 
