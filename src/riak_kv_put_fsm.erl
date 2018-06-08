@@ -631,9 +631,9 @@ waiting_remote_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     process_reply({error,timeout}, StateData);
 waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
                                                 trace = Trace,
-                                                start_time_send_to_vnodes = _T0}) ->
+                                                start_time_send_to_vnodes = T0}) ->
 
-    _T1 = os:timestamp(),
+    T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Result),
     ShortCode = riak_kv_put_core:result_shortcode(Result),
     case Trace of
@@ -643,8 +643,18 @@ waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
         _ ->
             ok
     end,
+
+    case ShortCode of
+        1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_w, Idx, T0, T1);
+        2 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_dw, Idx, T0, T1);
+        -1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_fail, Idx, T0, T1);
+        -2 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_error, Idx, T0, T1)
+    end,
     UpdPutCore1 = riak_kv_put_core:add_result(Result, PutCore),
-%%    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     case riak_kv_put_core:enough(UpdPutCore1) of
         true ->
             {Reply, UpdPutCore2} = riak_kv_put_core:response(UpdPutCore1),
@@ -710,9 +720,9 @@ finish(timeout, StateData = #state{timing = Timing, reply = Reply,
     {stop, normal, StateData};
 finish(Reply, StateData = #state{putcore = PutCore,
                                  trace = Trace,
-                                 start_time_send_to_vnodes = _T0}) ->
+                                 start_time_send_to_vnodes = T0}) ->
 
-    _T1 = os:timestamp(),
+    T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Reply),
     ShortCode = riak_kv_put_core:result_shortcode(Reply),
     case Trace of
@@ -722,9 +732,20 @@ finish(Reply, StateData = #state{putcore = PutCore,
         _ ->
             ok
     end,
+
+    case ShortCode of
+        1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_w, Idx, T0, T1);
+        2 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_dw, Idx, T0, T1);
+        -1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_fail, Idx, T0, T1);
+        -2 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(put_error, Idx, T0, T1)
+    end,
+
     %% late responses - add to state.  *Does not* recompute finalobj
     UpdPutCore = riak_kv_put_core:add_result(Reply, PutCore),
-%%    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     {next_state, finish, StateData#state{putcore = UpdPutCore}, 0}.
 
 
