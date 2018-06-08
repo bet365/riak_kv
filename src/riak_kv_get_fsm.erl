@@ -74,7 +74,8 @@
                 timing = [] :: [{atom(), erlang:timestamp()}],
                 calculated_timings :: {ResponseUSecs::non_neg_integer(),
                                        [{StateName::atom(), TimeUSecs::non_neg_integer()}]} | undefined,
-                crdt_op :: undefined | true
+                crdt_op :: undefined | true,
+                start_time_send_to_vnodes
                }).
 
 -include("riak_kv_dtrace.hrl").
@@ -152,7 +153,8 @@ init([From, Bucket, Key, Options0]) ->
                        options = Options,
                        bkey = {Bucket, Key},
                        timing = riak_kv_fsm_timing:add_timing(prepare, []),
-                       startnow = StartNow},
+                       startnow = StartNow,
+                       start_time_send_to_vnodes = -1},
     Trace = app_helper:get_env(riak_kv, fsm_trace_enabled),
     case Trace of 
         true ->
@@ -304,7 +306,7 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
             ok
     end,
     riak_kv_vnode:get(Preflist, BKey, ReqId),
-    StateData = StateData0#state{tref=TRef},
+    StateData = StateData0#state{tref=TRef, start_time_send_to_vnodes = os:timestamp()},
     new_state(waiting_vnode_r, StateData).
 
 %% @private calculate a concatenated preflist for tracing macro
@@ -319,7 +321,9 @@ preflist_for_tracing(Preflist) ->
 
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
-                                                                  trace=Trace}) ->
+                                                                  trace=Trace,
+                                                                  start_time_send_to_vnodes = T0}) ->
+    T1 = os:timestamp(),
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -327,6 +331,15 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
             ?DTRACE(?C_GET_FSM_WAITING_R, [ShortCode], ["waiting_vnode_r", IdxStr]);
         _ ->
             ok
+    end,
+
+    case ShortCode of
+        1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_ok, Idx, T0, T1);
+        0 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_notfound, Idx, T0, T1);
+        -1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_error, Idx, T0, T1)
     end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     case riak_kv_get_core:enough(UpdGetCore) of
@@ -348,7 +361,9 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
 
 %% @private
 waiting_read_repair({r, VnodeResult, Idx, _ReqId},
-                    StateData = #state{get_core = GetCore, trace=Trace}) ->
+                    StateData = #state{get_core = GetCore, trace=Trace, start_time_send_to_vnodes = T0}) ->
+
+    T1 = os:timestamp(),
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -357,6 +372,15 @@ waiting_read_repair({r, VnodeResult, Idx, _ReqId},
                     ["waiting_read_repair", IdxStr]);
         _ -> 
             ok
+    end,
+
+    case ShortCode of
+        1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_ok, Idx, T0, T1);
+        0 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_notfound, Idx, T0, T1);
+        -1 ->
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_rr_error, Idx, T0, T1)
     end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     maybe_finalize(StateData#state{get_core = UpdGetCore});
