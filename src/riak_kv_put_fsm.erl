@@ -644,7 +644,7 @@ waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
             ok
     end,
     UpdPutCore1 = riak_kv_put_core:add_result(Result, PutCore),
-    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
+%%    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     case riak_kv_put_core:enough(UpdPutCore1) of
         true ->
             {Reply, UpdPutCore2} = riak_kv_put_core:response(UpdPutCore1),
@@ -724,7 +724,7 @@ finish(Reply, StateData = #state{putcore = PutCore,
     end,
     %% late responses - add to state.  *Does not* recompute finalobj
     UpdPutCore = riak_kv_put_core:add_result(Reply, PutCore),
-    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
+%%    riak_core_optimised_apl:update_responsiveness_measurement(ShortCode, Idx, T0, T1),
     {next_state, finish, StateData#state{putcore = UpdPutCore}, 0}.
 
 
