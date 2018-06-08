@@ -21,7 +21,7 @@
 %% -------------------------------------------------------------------
 -module(riak_kv_put_core).
 -export([init/8, add_result/2, enough/1, response/1,
-         final/1, result_shortcode/1, result_idx/1, result_code/1]).
+         final/1, result_shortcode/1, result_idx/1s]).
 -export_type([putcore/0, result/0, reply/0]).
 
 -ifdef(TEST).
