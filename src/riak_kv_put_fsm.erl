@@ -631,9 +631,9 @@ waiting_remote_vnode(request_timeout, StateData=#state{trace = Trace}) ->
     process_reply({error,timeout}, StateData);
 waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
                                                 trace = Trace,
-                                                start_time_send_to_vnodes = T0}) ->
+                                                start_time_send_to_vnodes = _T0}) ->
 
-    T1 = os:timestamp(),
+    _T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Result),
     ShortCode = riak_kv_put_core:result_shortcode(Result),
     case Trace of
@@ -710,9 +710,9 @@ finish(timeout, StateData = #state{timing = Timing, reply = Reply,
     {stop, normal, StateData};
 finish(Reply, StateData = #state{putcore = PutCore,
                                  trace = Trace,
-                                 start_time_send_to_vnodes = T0}) ->
+                                 start_time_send_to_vnodes = _T0}) ->
 
-    T1 = os:timestamp(),
+    _T1 = os:timestamp(),
     Idx = riak_kv_put_core:result_idx(Reply),
     ShortCode = riak_kv_put_core:result_shortcode(Reply),
     case Trace of
