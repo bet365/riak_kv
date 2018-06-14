@@ -322,8 +322,8 @@ preflist_for_tracing(Preflist) ->
 %% @private
 waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = GetCore,
                                                                   trace=Trace,
-                                                                  start_time_send_to_vnodes = T0}) ->
-    T1 = os:timestamp(),
+                                                                  start_time_send_to_vnodes = _T0}) ->
+    _T1 = os:timestamp(),
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -333,14 +333,14 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
             ok
     end,
 
-    case ShortCode of
-        1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_ok, Idx, T0, T1);
-        0 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_notfound, Idx, T0, T1);
-        -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_error, Idx, T0, T1)
-    end,
+%%    case ShortCode of
+%%        1 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_ok, Idx, T0, T1);
+%%        0 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_notfound, Idx, T0, T1);
+%%        -1 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_error, Idx, T0, T1)
+%%    end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
@@ -361,9 +361,8 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
 
 %% @private
 waiting_read_repair({r, VnodeResult, Idx, _ReqId},
-                    StateData = #state{get_core = GetCore, trace=Trace, start_time_send_to_vnodes = T0}) ->
-
-    T1 = os:timestamp(),
+                    StateData = #state{get_core = GetCore, trace=Trace, start_time_send_to_vnodes = _T0}) ->
+    _T1 = os:timestamp(),
     case Trace of
         true ->
             ShortCode = riak_kv_get_core:result_shortcode(VnodeResult),
@@ -374,14 +373,14 @@ waiting_read_repair({r, VnodeResult, Idx, _ReqId},
             ok
     end,
 
-    case ShortCode of
-        1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_ok, Idx, T0, T1);
-        0 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_notfound, Idx, T0, T1);
-        -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_rr_error, Idx, T0, T1)
-    end,
+%%    case ShortCode of
+%%        1 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_ok, Idx, T0, T1);
+%%        0 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(pass, get_rr_notfound, Idx, T0, T1);
+%%        -1 ->
+%%            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(fail, get_rr_error, Idx, T0, T1)
+%%    end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     maybe_finalize(StateData#state{get_core = UpdGetCore});
 waiting_read_repair(request_timeout, StateData = #state{trace=Trace}) ->
