@@ -335,11 +335,11 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId}, StateData = #state{get_core = Get
 
     case ShortCode of
         1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, get_ok, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, get_ok, Idx, T0, T1);
         0 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, get_notfound, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, get_notfound, Idx, T0, T1);
         -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, get_error, Idx, T0, T1)
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, get_error, Idx, T0, T1)
     end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     case riak_kv_get_core:enough(UpdGetCore) of
@@ -375,11 +375,11 @@ waiting_read_repair({r, VnodeResult, Idx, _ReqId},
 
     case ShortCode of
         1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, get_rr_ok, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, get_rr_ok, Idx, T0, T1);
         0 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, get_rr_notfound, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, get_rr_notfound, Idx, T0, T1);
         -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, get_rr_error, Idx, T0, T1)
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, get_rr_error, Idx, T0, T1)
     end,
     UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     maybe_finalize(StateData#state{get_core = UpdGetCore});

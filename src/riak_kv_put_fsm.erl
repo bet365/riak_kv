@@ -646,13 +646,13 @@ waiting_remote_vnode(Result, StateData = #state{putcore = PutCore,
 
     case ShortCode of
         1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, put_w, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, put_w, Idx, T0, T1);
         2 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, put_dw, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, put_dw, Idx, T0, T1);
         -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, put_fail, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, put_fail, Idx, T0, T1);
         -2 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, put_error, Idx, T0, T1)
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, put_error, Idx, T0, T1)
     end,
     UpdPutCore1 = riak_kv_put_core:add_result(Result, PutCore),
     case riak_kv_put_core:enough(UpdPutCore1) of
@@ -735,13 +735,13 @@ finish(Reply, StateData = #state{putcore = PutCore,
 
     case ShortCode of
         1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, put_w, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, put_w, Idx, T0, T1);
         2 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(passed, put_dw, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_pass, put_dw, Idx, T0, T1);
         -1 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, put_fail, Idx, T0, T1);
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, put_fail, Idx, T0, T1);
         -2 ->
-            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(failed, put_error, Idx, T0, T1)
+            riak_core_remote_vnode_load_monitor:update_responsiveness_measurement(request_response_fail, put_error, Idx, T0, T1)
     end,
 
     %% late responses - add to state.  *Does not* recompute finalobj
