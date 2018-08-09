@@ -158,12 +158,10 @@ start_exchange_remote(FsmPid, Version, From, IndexN, Tree) ->
 %% @doc Update all hashtrees managed by the provided index_hashtree pid.
 -spec update(index_n(), pid()) -> ok | not_responsible.
 update(Id, Tree) ->
-    update(Id, Tree, undefined).
+  gen_server:call(Tree, {update_tree, Id}, infinity).
 
 %% @doc Update all hashtrees managed by the provided index_hashtree pid.
--spec update(index_n(), pid(), undefined | update_callback()) -> ok | not_responsible.
-update(Id, Tree, undefined) ->
-    gen_server:call(Tree, {update_tree, Id, undefined}, infinity);
+-spec update(index_n(), pid(),  undefined | update_callback()) -> ok | not_responsible.
 update(Id, Tree, Callback) when is_function(Callback) ->
     gen_server:call(Tree, {update_tree, Id, Callback}, infinity).
 
@@ -346,15 +344,10 @@ handle_call({delete, Items}, _From, State) ->
 handle_call(get_trees, _From, #state{trees=Trees}=State) ->
     {reply, Trees, State};
 
+handle_call({update_tree, Id}, From, State) ->
+  do_update_tree(Id, undefined, From, State);
 handle_call({update_tree, Id, Callback}, From, State) ->
-    lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
-    apply_tree(Id,
-        fun(Tree) ->
-            NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),
-            {noreply, NewTree}
-            end,
-        State
-    );
+    do_update_tree(Id, Callback, From, State);
 
 handle_call({exchange_bucket, Id, Level, Bucket}, _From, State) ->
     apply_tree(Id,
@@ -1261,3 +1254,14 @@ now_epoch() ->
 int_byte_size(?SMALL_INT_VER) -> ?SMALL_INT_BYTES;
 int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES;
 int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
+
+
+do_update_tree(Id, Callback, From, State) ->
+  lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
+  apply_tree(Id,
+    fun(Tree) ->
+      NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),
+      {noreply, NewTree}
+    end,
+    State
+  ).
