@@ -162,7 +162,7 @@ update(Id, Tree) ->
 
 %% @doc Update all hashtrees managed by the provided index_hashtree pid.
 -spec update(index_n(), pid(),  undefined | update_callback()) -> ok | not_responsible.
-update(Id, Tree, undefiend) ->
+update(Id, Tree, undefined) ->
     gen_server:call(Tree, {update_tree, Id, undefined}, infinity);
 update(Id, Tree, Callback) when is_function(Callback) ->
     gen_server:call(Tree, {update_tree, Id, Callback}, infinity).
