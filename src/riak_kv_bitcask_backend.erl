@@ -331,8 +331,9 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val,
                     {ok, state()}.
 delete(Bucket, Key, _IndexSpecs,
        #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_kd(KeyVsn, Bucket, Key),
-    ok = bitcask:delete(Ref, BitcaskKey),
+    BitcaskKey = make_bk(KeyVsn, Bucket, Key, ?DEFAULT_TSTAMP_EXPIRE),
+    {KeyDirKey, _} = ?CURRENT_KEY_TRANS(BitcaskKey),
+    ok = bitcask:delete(Ref, KeyDirKey, BitcaskKey),
     {ok, State}.
 
 %% @doc Fold over all the buckets.
