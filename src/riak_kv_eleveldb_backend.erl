@@ -210,13 +210,11 @@ put(Bucket, PrimaryKey, IndexSpecs, Val, #state{ref=Ref,
             {error, Reason, State}
     end.
 
-%%async_put(Context, Bucket, PrimaryKey, Val, #state{ref=Ref, write_opts=WriteOpts}=State) ->
-%%    StorageKey = to_object_key(Bucket, PrimaryKey),
-%%    eleveldb:async_put(Ref, Context, StorageKey, Val, WriteOpts),
-%%    {ok, State}.
+async_put(Context, Bucket, PrimaryKey, Val, #state{ref=Ref, write_opts=WriteOpts}=State) ->
+    StorageKey = to_object_key(Bucket, PrimaryKey),
+    eleveldb:async_put(Ref, Context, StorageKey, Val, WriteOpts),
+    {ok, State}.
 
-async_put(_Context, _Bucket, _PrimaryKey, _Val, State) ->
-  {ok, State}.
 
 indexes_fixed(#state{ref=Ref,read_opts=ReadOpts}) ->
     case eleveldb:get(Ref, to_md_key(?FIXED_INDEXES_KEY), ReadOpts) of
