@@ -1225,12 +1225,10 @@ delete(State=#state{status_mgr_pid=StatusMgr, mod=Mod, modstate=ModState}) ->
 terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) ->
     Mod:stop(ModState),
 
-    %% Explicitly stop the hashtree rather than relying on the process monitor
-    %% to detect the vnode exit.  As riak_kv_index_hashtree is not a supervised
-    %% process in the riak_kv application, on graceful shutdown riak_kv and
-    %% riak_core can complete their shutdown before the hashtree is written
-    %% to disk causing the hashtree to be closed dirty.
-    riak_kv_index_hashtree:sync_stop(Trees),
+    %% Cast an async stop to the riak_kv_index_hastree's as to prevent holding in this terminate function for too long
+    %% This fixes the riak_kv_vnode timeout on shutdown issue, which is caused by a long running update to the hashtrees
+    %% This is not needed, as the riak_kv_index_hashtree monitors the vnode pid and would close by itself anyway.
+    riak_kv_index_hashtree:stop(Trees),
     riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
 
