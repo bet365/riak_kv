@@ -1193,7 +1193,7 @@ maybe_get_vnode_lock(SrcPartition, Pid) ->
             ok
     end.
 
-snapshot_and_async_update_tree(Tree, Id, From, Callback) ->
+snapshot_and_async_update_tree(Tree, Id, From, Callback, ItrFilterFun) ->
     {SnapTree, Tree2} = hashtree:update_snapshot(Tree),
     Tree3 = hashtree:set_next_rebuild(Tree2, full),
     Self = self(),
@@ -1206,7 +1206,13 @@ snapshot_and_async_update_tree(Tree, Id, From, Callback) ->
                         "An error occurred in update callback: ~p.  "
                         "Ignoring error and proceeding with update.", [E])
             end,
-            _ = hashtree:update_perform(SnapTree),
+
+            case Id of
+                ?INDEX_2I_N ->
+                    _ = hashtree:update_perform(SnapTree);
+                _ ->
+                    _ = hashtree:update_perform(SnapTree, ItrFilterFun)
+            end,
             gen_server:cast(Self, {updated, Id}),
             gen_server:reply(From, ok)
         end),
