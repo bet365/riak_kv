@@ -51,6 +51,7 @@
          hash_object/3,
          update/2,
          update/3,
+         update/4,
          start_exchange_remote/5,
          delete/2,
          async_delete/2,
@@ -64,7 +65,7 @@
          index_2i_n/0,
          get_trees/1,
          get_version/1,
-         hashtree_itr_filter_expired/3]).
+         hashtree_itr_filter_expired/4]).
 
 -export([poke/1,
          get_build_time/1]).
@@ -160,12 +161,19 @@ start_exchange_remote(FsmPid, Version, From, IndexN, Tree) ->
 update(Id, Tree) ->
   gen_server:call(Tree, {update_tree, Id}, infinity).
 
-%% @doc Update all hashtrees managed by the provided index_hashtree pid.
+
 -spec update(index_n(), pid(),  undefined | update_callback()) -> ok | not_responsible.
 update(Id, Tree, undefined) ->
     gen_server:call(Tree, {update_tree, Id, undefined}, infinity);
 update(Id, Tree, Callback) when is_function(Callback) ->
     gen_server:call(Tree, {update_tree, Id, Callback}, infinity).
+
+update(Id, Tree, Callback, ItrFilterFun) when is_function(Callback) and is_function(ItrFilterFun) ->
+    gen_server:call(Tree, {update_tree, Id, Callback, ItrFilterFun}, infinity);
+update(Id, Tree, undefined, ItrFilterFun) when is_function(ItrFilterFun) ->
+    gen_server:call(Tree, {update_tree, Id, undefined, ItrFilterFun}, infinity);
+update(Id, Tree, undefined, undefined) ->
+    gen_server:call(Tree, {update_tree, Id, undefined, undefined}, infinity).
 
 %% @doc Return a hash bucket from the tree identified by the given tree id
 %%      that is managed by the provided index_hashtree.
@@ -347,9 +355,11 @@ handle_call(get_trees, _From, #state{trees=Trees}=State) ->
     {reply, Trees, State};
 
 handle_call({update_tree, Id}, From, State) ->
-  do_update_tree(Id, undefined, From, State);
+  do_update_tree(Id, undefined, undefined, From, State);
 handle_call({update_tree, Id, Callback}, From, State) ->
-    do_update_tree(Id, Callback, From, State);
+    do_update_tree(Id, Callback, undefined, From, State);
+handle_call({update_tree, Id, Callback, ItrFilterFun}, From, State) ->
+    do_update_tree(Id, Callback, ItrFilterFun, From, State);
 
 handle_call({exchange_bucket, Id, Level, Bucket}, _From, State) ->
     apply_tree(Id,
@@ -721,11 +731,9 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     IdBin = tree_id(Id),
     NewTree0 = case Trees of
                   [] ->
-                      Opts = maybe_add_itr_filter_fun(Id),
-                      hashtree:new({Index,IdBin}, [{segment_path, Path}|Opts]);
+                      hashtree:new({Index,IdBin}, [{segment_path, Path}]);
                   [{_,Other}|_] ->
-                      Opts = maybe_add_itr_filter_fun(Id),
-                      hashtree:new({Index,IdBin}, Other, Opts)
+                      hashtree:new({Index,IdBin}, Other, [])
                end,
     NewTree1 = case MarkType of
                    mark_empty -> hashtree:mark_open_empty(Id, NewTree0);
@@ -733,9 +741,6 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
                end,
     Trees2 = orddict:store(Id, NewTree1, Trees),
     State#state{trees=Trees2}.
-
-maybe_add_itr_filter_fun(?INDEX_2I_N) -> [];
-maybe_add_itr_filter_fun(_) -> [{itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}].
 
 %% This function never uses the Type field. Unsure why it is part of the API. Maybe was meant to be used
 %% by the background manager which could manage tokens based on Type atom. Best guess...
@@ -1231,31 +1236,26 @@ maybe_callback(Callback) ->
 %% The riak_object clock is hashed using phash2, which will return an int between 
 %% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
 %% need to know this size so we can match the epoch from the binary (if it has one).
-hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
+hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState, SharedTimeStamp) ->
     IntSize = int_byte_size(IntVer),
     <<H:IntSize/binary, Epoch/binary>> = Bin,
-    maybe_filter_expired(K, H, Epoch, TreeState);
-hashtree_itr_filter_expired(K, H, _TreeState) ->
+    maybe_filter_expired(K, H, Epoch, TreeState, SharedTimeStamp);
+hashtree_itr_filter_expired(K, H, _TreeState, _SharedTimeStamp) ->
     [{K,H}].
 
 %% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
 %% to the iterator in hashtree.
-maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
-maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
-    do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
+maybe_filter_expired(K, H, <<>>, _TreeState, _SharedTimeStamp) -> [{K, H}];
+maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState, SharedTimeStamp) ->
+    do_filter_expired(K, H, Epoch, TreeState, SharedTimeStamp).
 
 %% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
 %% delete it from the hashtree and return an empty list to exclude it from the 
 %% hashtree itr, which means that it wont be exchanged with other replicas.
-do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
-do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
-    hashtree:delete(K, TreeState),
+do_filter_expired(K, H, Epoch, _TreeState, SharedTimeStamp) when SharedTimeStamp < Epoch -> [{K, H}];
+do_filter_expired(K, _H, _Epoch, TreeState, _SharedTimeStamp) ->
+    hashtree:raw_delete(K, TreeState),
     [].
-
-now_epoch() ->
-    {M, S, _} = os:timestamp(),
-    Now = M * 1000000 + S,
-    Now.
 
 %% Determine the size of an int as per its erlang version byte. This can be 3 or
 %% 6 bytes.
@@ -1264,11 +1264,11 @@ int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES;
 int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
 
 
-do_update_tree(Id, Callback, From, State) ->
+do_update_tree(Id, Callback, ItrFilterFun, From, State) ->
   lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
   apply_tree(Id,
     fun(Tree) ->
-      NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),
+      NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback, ItrFilterFun),
       {noreply, NewTree}
     end,
     State

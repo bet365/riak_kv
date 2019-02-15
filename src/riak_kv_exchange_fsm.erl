@@ -151,8 +151,23 @@ update_trees(start_exchange, State=#state{local=LocalVN,
     lager:debug("Sending to ~p", [LocalVN]),
     lager:debug("Sending to ~p", [RemoteVN]),
 
-    update_request(LocalTree, LocalVN, IndexN),
-    update_request(RemoteTree, RemoteVN, IndexN),
+    %% Make a timestamp to share to each tree
+    {M, S, _} = os:timestamp(),
+    SharedTimeStamp = (M * 1000000) + S,
+
+    %% Make ItrFilterFun
+    ItrFilterFun =
+        case riak_core_capability:get({riak_kv, pass_through_itr_filter_fun}) of
+            true ->
+                fun(K, V, TreeState) ->
+                    riak_kv_index_hashtree:hashtree_itr_filter_expired(K, V, TreeState, SharedTimeStamp)
+                end;
+            false ->
+                undefined
+        end,
+
+    update_request(LocalTree, LocalVN, IndexN, ItrFilterFun),
+    update_request(RemoteTree, RemoteVN, IndexN, ItrFilterFun),
     {next_state, update_trees, State};
 
 update_trees({not_responsible, VNodeIdx, IndexN}, State) ->
@@ -307,7 +322,7 @@ repair_consistent(BKey) ->
     ok.
 
 %% @private
-update_request(Tree, {Index, _}, IndexN) ->
+update_request(Tree, {Index, _}, IndexN, undefined) ->
     as_event(fun() ->
                      case riak_kv_index_hashtree:update(IndexN, Tree) of
                          ok ->
@@ -315,6 +330,15 @@ update_request(Tree, {Index, _}, IndexN) ->
                          not_responsible ->
                              {not_responsible, Index, IndexN}
                      end
+             end);
+update_request(Tree, {Index, _}, IndexN, ItrFilterFun) ->
+    as_event(fun() ->
+        case riak_kv_index_hashtree:update(IndexN, Tree, undefined, ItrFilterFun) of
+            ok ->
+                {tree_built, Index, IndexN};
+            not_responsible ->
+                {not_responsible, Index, IndexN}
+        end
              end).
 
 remote_exchange_request(RemoteVN, IndexN, Version) ->
