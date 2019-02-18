@@ -22,7 +22,8 @@
 -behaviour(gen_fsm).
 
 %% API
--export([start/5]).
+-export([start/5,
+         start/6]).
 
 %% FSM states
 -export([prepare_exchange/2,
@@ -44,7 +45,8 @@
                 remote_tree :: pid(),
                 built       :: non_neg_integer(),
                 timer       :: reference(),
-                timeout     :: pos_integer()
+                timeout     :: pos_integer(),
+                itr_filter_fun
                }).
 
 %% Per state transition timeout used by certain transitions
@@ -58,13 +60,16 @@
 %%%===================================================================
 
 start(LocalVN, RemoteVN, IndexN, Tree, Manager) ->
-    gen_fsm:start(?MODULE, [LocalVN, RemoteVN, IndexN, Tree, Manager], []).
+    gen_fsm:start(?MODULE, [LocalVN, RemoteVN, IndexN, Tree, Manager, undefined], []).
+
+start(LocalVN, RemoteVN, IndexN, Tree, Manager, ItrFilterFun) ->
+    gen_fsm:start(?MODULE, [LocalVN, RemoteVN, IndexN, Tree, Manager, ItrFilterFun], []).
 
 %%%===================================================================
 %%% gen_fsm callbacks
 %%%===================================================================
 
-init([LocalVN, RemoteVN, IndexN, LocalTree, Manager]) ->
+init([LocalVN, RemoteVN, IndexN, LocalTree, Manager, ItrFilterFun]) ->
     Timeout = app_helper:get_env(riak_kv,
                                  anti_entropy_timeout,
                                  ?DEFAULT_ACTION_TIMEOUT),
@@ -75,7 +80,8 @@ init([LocalVN, RemoteVN, IndexN, LocalTree, Manager]) ->
                    index_n=IndexN,
                    local_tree=LocalTree,
                    timeout=Timeout,
-                   built=0},
+                   built=0,
+                   itr_filter_fun = ItrFilterFun},
     gen_fsm:send_event(self(), start_exchange),
     lager:debug("Starting exchange: ~p", [LocalVN]),
     {ok, prepare_exchange, State}.
@@ -147,24 +153,10 @@ update_trees(start_exchange, State=#state{local=LocalVN,
                                           remote=RemoteVN,
                                           local_tree=LocalTree,
                                           remote_tree=RemoteTree,
-                                          index_n=IndexN}) ->
+                                          index_n=IndexN,
+                                          itr_filter_fun = ItrFilterFun}) ->
     lager:debug("Sending to ~p", [LocalVN]),
     lager:debug("Sending to ~p", [RemoteVN]),
-
-    %% Make a timestamp to share to each tree
-    {M, S, _} = os:timestamp(),
-    SharedTimeStamp = (M * 1000000) + S,
-
-    %% Make ItrFilterFun
-    ItrFilterFun =
-        case riak_core_capability:get({riak_kv, pass_through_itr_filter_fun}) of
-            true ->
-                fun(K, V, TreeState) ->
-                    riak_kv_index_hashtree:hashtree_itr_filter_expired(K, V, TreeState, SharedTimeStamp)
-                end;
-            false ->
-                undefined
-        end,
 
     update_request(LocalTree, LocalVN, IndexN, ItrFilterFun),
     update_request(RemoteTree, RemoteVN, IndexN, ItrFilterFun),

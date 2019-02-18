@@ -86,7 +86,8 @@
                 vnode_status_pid = undefined :: 'undefined' | pid(),
                 last_throttle  = undefined :: 'undefined' | non_neg_integer(),
                 version        = legacy :: version(),
-                pending_version = legacy :: version()
+                pending_version = legacy :: version(),
+                exchange_itr_filter_fun = false :: boolean()
                }).
 
 -type state() :: #state{}.
@@ -317,6 +318,7 @@ init([]) ->
                    exchange_queue=[]},
     State2 = reset_build_tokens(State),
     schedule_reset_build_tokens(),
+    schedule_core_capability_check(10000),
     {ok, State2}.
 
 register_capabilities() ->
@@ -425,6 +427,18 @@ handle_info({'DOWN', Ref, _, Obj, Status}, State) ->
     State3 = maybe_clear_exchange(Ref, Status, State2),
     State4 = maybe_clear_registered_tree(Obj, State3),
     {noreply, State4};
+handle_info(check_core_capability, State=#state{exchange_itr_filter_fun = false}) ->
+    case riak_core_capability:get({riak_kv, exchange_itr_filter_fun}) of
+        true ->
+            %% Delete itr_filter_fun in riak_kv_index_hashtree
+            {noreply, State#state{exchange_itr_filter_fun = true}};
+        false ->
+            schedule_core_capability_check(10000),
+            {noreply, State}
+
+    end;
+handle_info(check_core_capability, State=#state{exchange_itr_filter_fun = false}) ->
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -437,6 +451,20 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+make_itr_filter_fun(#state{exchange_itr_filter_fun = false}) ->
+    undefined;
+make_itr_filter_fun(#state{exchange_itr_filter_fun = true}) ->
+    %% Make a timestamp to share to each tree
+    {M, S, _} = os:timestamp(),
+    SharedTimeStamp = (M * 1000000) + S,
+
+    %% Make ItrFilterFun
+    fun(K, V, TreeState) ->
+        riak_kv_index_hashtree:hashtree_itr_filter_expired(K, V, TreeState, SharedTimeStamp)
+    end.
+
+schedule_core_capability_check(Time) ->
+    erlang:send_after(Time, self(), check_core_capability).
 
 clear_all_exchanges(Exchanges) ->
     [begin
@@ -891,8 +919,16 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                     State2 = requeue_exchange(LocalIdx, RemoteIdx, IndexN, State),
                     {not_built, State2};
                 {ok, Tree} ->
-                    case riak_kv_exchange_fsm:start(LocalVN, RemoteVN,
-                                                    IndexN, Tree, self()) of
+
+                    FSMReply =
+                        case make_itr_filter_fun(State) of
+                            undefined ->
+                                riak_kv_exchange_fsm:start(LocalVN, RemoteVN, IndexN, Tree, self());
+                            ItrFilterFun ->
+                                riak_kv_exchange_fsm:start(LocalVN, RemoteVN, IndexN, Tree, self(), ItrFilterFun)
+                        end,
+
+                    case FSMReply of
                         {ok, FsmPid} ->
                             Ref = monitor(process, FsmPid),
                             Exchanges = State#state.exchanges,
