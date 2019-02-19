@@ -22,8 +22,7 @@
 -behaviour(gen_fsm).
 
 %% API
--export([start/5,
-         start/6]).
+-export([start/6]).
 
 %% FSM states
 -export([prepare_exchange/2,
@@ -58,10 +57,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-start(LocalVN, RemoteVN, IndexN, Tree, Manager) ->
-    gen_fsm:start(?MODULE, [LocalVN, RemoteVN, IndexN, Tree, Manager, undefined], []).
-
 start(LocalVN, RemoteVN, IndexN, Tree, Manager, ItrFilterFun) ->
     gen_fsm:start(?MODULE, [LocalVN, RemoteVN, IndexN, Tree, Manager, ItrFilterFun], []).
 
@@ -314,24 +309,24 @@ repair_consistent(BKey) ->
     ok.
 
 %% @private
-update_request(Tree, {Index, _}, IndexN, undefined) ->
-    as_event(fun() ->
-                     case riak_kv_index_hashtree:update(IndexN, Tree) of
-                         ok ->
-                             {tree_built, Index, IndexN};
-                         not_responsible ->
-                             {not_responsible, Index, IndexN}
-                     end
-             end);
 update_request(Tree, {Index, _}, IndexN, ItrFilterFun) ->
-    as_event(fun() ->
-        case riak_kv_index_hashtree:update(IndexN, Tree, undefined, ItrFilterFun) of
-            ok ->
-                {tree_built, Index, IndexN};
-            not_responsible ->
-                {not_responsible, Index, IndexN}
-        end
-             end).
+    as_event(
+        fun() ->
+            Result =
+                case ItrFilterFun of
+                    undefined -> riak_kv_index_hashtree:update(IndexN, Tree);
+                    _ -> riak_kv_index_hashtree:update(IndexN, Tree, undefined, ItrFilterFun)
+                end,
+            update_request_helper(Result, Index, IndexN)
+        end).
+
+update_request_helper(Result, Index, IndexN) ->
+    case Result of
+        ok ->
+            {tree_built, Index, IndexN};
+        not_responsible ->
+            {not_responsible, Index, IndexN}
+    end.
 
 remote_exchange_request(RemoteVN, IndexN, Version) ->
     FsmPid = self(),

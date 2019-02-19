@@ -214,8 +214,7 @@ maybe_backend_reap(Tombstone, _) ->
     Tombstone.
 
 create_expiry_time(BackendReapThreshold) ->
-    {M, S, _} = os:timestamp(),
-    Now = M * 1000000 + S,
+    Now = riak_kv_util:now_epoch(),
     Now + BackendReapThreshold.
 %% ===================================================================
 %% EUnit tests

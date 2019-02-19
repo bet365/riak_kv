@@ -48,7 +48,9 @@
          overload_reply/1,
          get_backend_config/3,
          is_modfun_allowed/2,
-         backend_reap_mode/1]).
+         backend_reap_mode/1,
+         now_epoch/0,
+         now_epoch/1]).
 
 -include_lib("riak_kv_vnode.hrl").
 
@@ -63,6 +65,11 @@
 %% ===================================================================
 %% Public API
 %% ===================================================================
+
+now_epoch() ->
+    now_epoch(os:timestamp()).
+now_epoch({M, S, _}) ->
+    M * 1000000 + S.
 
 %% @spec is_x_deleted(riak_object:riak_object()) -> boolean()
 %% @doc 'true' if all contents of the input object are marked

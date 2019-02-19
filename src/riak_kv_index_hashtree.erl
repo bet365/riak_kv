@@ -65,7 +65,8 @@
          index_2i_n/0,
          get_trees/1,
          get_version/1,
-         hashtree_itr_filter_expired/4]).
+         hashtree_itr_filter_expired/4,
+         remove_itr_filter_fun/1]).
 
 -export([poke/1,
          get_build_time/1]).
@@ -88,7 +89,8 @@
                 build_time,
                 trees,
                 use_2i = false :: boolean(),
-                version = legacy :: version()}).
+                version = legacy :: version(),
+                exchange_itr_filter_fun = false:: boolean()}).
 
 -type state() :: #state{}.
 
@@ -282,6 +284,8 @@ estimate_keys(Tree) ->
 estimate_keys(Tree, IndexN) ->
     gen_server:call(Tree, {estimate_keys, IndexN}, infinity).
 
+remove_itr_filter_fun(Tree) ->
+    gen_server:call(Tree, remove_itr_filter_fun, infinity).
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -312,13 +316,15 @@ init([Index, VNPid, Opts]) ->
             monitor(process, VNPid),
             Use2i = lists:member(use_2i, Opts),
             VNEmpty = lists:member(vnode_empty, Opts),
+            ExchangeItrFilterFun = riak_core_capability:get({riak_kv, exchange_itr_filter_fun}),
             State = #state{index=Index,
                            vnode_pid=VNPid,
                            trees=orddict:new(),
                            built=false,
                            use_2i=Use2i,
                            path=Path,
-                           version=Version},
+                           version=Version,
+                           exchange_itr_filter_fun = ExchangeItrFilterFun},
             IndexNs = responsible_preflists(State),
             State2 = init_trees(IndexNs, VNEmpty, State),
             %% If vnode is empty, mark tree as built without performing fold
@@ -413,7 +419,15 @@ handle_call(stop, _From, State0) ->
 
 handle_call(_Request, _From, State) ->
     Reply = ok,
-    {reply, Reply, State}.
+    {reply, Reply, State};
+
+handle_call(remove_itr_filter_fun, _From, State = #state{trees = Trees})->
+    NewTrees = orddict:fold(
+        fun(Id, TreeState, AccIn) ->
+            orddict:store(Id, hashtree:remove_itr_filter_fun(TreeState), AccIn)
+        end,
+        [], Trees),
+    {reply, ok, State#state{trees = NewTrees}}.
 
 handle_cast(poke, State) ->
     State2 = do_poke(State),
@@ -729,11 +743,14 @@ index_2i_n() ->
 do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     Index = State#state.index,
     IdBin = tree_id(Id),
+    ExchangeItrFilterFun = State#state.exchange_itr_filter_fun,
     NewTree0 = case Trees of
                   [] ->
-                      hashtree:new({Index,IdBin}, [{segment_path, Path}]);
+                      Opts = maybe_add_itr_filter_fun(Id, ExchangeItrFilterFun),
+                      hashtree:new({Index,IdBin}, [{segment_path, Path}|Opts]);
                   [{_,Other}|_] ->
-                      hashtree:new({Index,IdBin}, Other, [])
+                      Opts = maybe_add_itr_filter_fun(Id, ExchangeItrFilterFun),
+                      hashtree:new({Index,IdBin}, Other, Opts)
                end,
     NewTree1 = case MarkType of
                    mark_empty -> hashtree:mark_open_empty(Id, NewTree0);
@@ -741,6 +758,18 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
                end,
     Trees2 = orddict:store(Id, NewTree1, Trees),
     State#state{trees=Trees2}.
+
+
+
+maybe_add_itr_filter_fun(_, false) -> [];
+maybe_add_itr_filter_fun(?INDEX_2I_N, true) -> [];
+maybe_add_itr_filter_fun(_, true) ->
+    ItrFilterFun =
+        fun(K, V, S) ->
+            Now = riak_kv_util:now_epoch(),
+            ?MODULE:hashtree_itr_filter_expired(K, V, S, Now)
+        end,
+    [{itr_filter_fun, ItrFilterFun}].
 
 %% This function never uses the Type field. Unsure why it is part of the API. Maybe was meant to be used
 %% by the background manager which could manage tokens based on Type atom. Best guess...
@@ -1198,6 +1227,15 @@ maybe_get_vnode_lock(SrcPartition, Pid) ->
             ok
     end.
 
+do_update_tree(Id, Callback, ItrFilterFun, From, State) ->
+    lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
+    apply_tree(Id,
+        fun(Tree) ->
+            NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback, ItrFilterFun),
+            {noreply, NewTree}
+        end,
+        State).
+
 snapshot_and_async_update_tree(Tree, Id, From, Callback, ItrFilterFun) ->
     {SnapTree, Tree2} = hashtree:update_snapshot(Tree),
     Tree3 = hashtree:set_next_rebuild(Tree2, full),
@@ -1236,6 +1274,7 @@ maybe_callback(Callback) ->
 %% The riak_object clock is hashed using phash2, which will return an int between 
 %% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
 %% need to know this size so we can match the epoch from the binary (if it has one).
+
 hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState, SharedTimeStamp) ->
     IntSize = int_byte_size(IntVer),
     <<H:IntSize/binary, Epoch/binary>> = Bin,
@@ -1262,14 +1301,3 @@ do_filter_expired(K, _H, _Epoch, TreeState, _SharedTimeStamp) ->
 int_byte_size(?SMALL_INT_VER) -> ?SMALL_INT_BYTES;
 int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES;
 int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
-
-
-do_update_tree(Id, Callback, ItrFilterFun, From, State) ->
-  lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
-  apply_tree(Id,
-    fun(Tree) ->
-      NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback, ItrFilterFun),
-      {noreply, NewTree}
-    end,
-    State
-  ).

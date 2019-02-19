@@ -431,13 +431,15 @@ handle_info(check_core_capability, State=#state{exchange_itr_filter_fun = false}
     case riak_core_capability:get({riak_kv, exchange_itr_filter_fun}) of
         true ->
             %% Delete itr_filter_fun in riak_kv_index_hashtree
+            Trees = State#state.trees,
+            lists:foreach(fun({_, Pid}) -> riak_kv_index_hashtree:remove_itr_filter_fun(Pid) end, Trees),
             {noreply, State#state{exchange_itr_filter_fun = true}};
         false ->
             schedule_core_capability_check(10000),
             {noreply, State}
 
     end;
-handle_info(check_core_capability, State=#state{exchange_itr_filter_fun = false}) ->
+handle_info(check_core_capability, State=#state{exchange_itr_filter_fun = true}) ->
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -455,9 +457,7 @@ make_itr_filter_fun(#state{exchange_itr_filter_fun = false}) ->
     undefined;
 make_itr_filter_fun(#state{exchange_itr_filter_fun = true}) ->
     %% Make a timestamp to share to each tree
-    {M, S, _} = os:timestamp(),
-    SharedTimeStamp = (M * 1000000) + S,
-
+    SharedTimeStamp = riak_kv_util:now_epoch(),
     %% Make ItrFilterFun
     fun(K, V, TreeState) ->
         riak_kv_index_hashtree:hashtree_itr_filter_expired(K, V, TreeState, SharedTimeStamp)
@@ -919,16 +919,8 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                     State2 = requeue_exchange(LocalIdx, RemoteIdx, IndexN, State),
                     {not_built, State2};
                 {ok, Tree} ->
-
-                    FSMReply =
-                        case make_itr_filter_fun(State) of
-                            undefined ->
-                                riak_kv_exchange_fsm:start(LocalVN, RemoteVN, IndexN, Tree, self());
-                            ItrFilterFun ->
-                                riak_kv_exchange_fsm:start(LocalVN, RemoteVN, IndexN, Tree, self(), ItrFilterFun)
-                        end,
-
-                    case FSMReply of
+                    ItrFilterFun = make_itr_filter_fun(State),
+                    case riak_kv_exchange_fsm:start(LocalVN, RemoteVN, IndexN, Tree, self(), ItrFilterFun) of
                         {ok, FsmPid} ->
                             Ref = monitor(process, FsmPid),
                             Exchanges = State#state.exchanges,
