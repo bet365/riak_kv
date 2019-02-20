@@ -960,7 +960,7 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                                     {Reason, State}
                             end;
                         Error ->
-                            {error, Error}
+                            {Error, State}
                     end
             end;
         _ ->
