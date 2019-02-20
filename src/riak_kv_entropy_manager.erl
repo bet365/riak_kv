@@ -98,6 +98,7 @@
 -define(DEFAULT_AAE_THROTTLE_LIMITS,
         [{-1,0}, {200,10}, {500,50}, {750,250}, {900,1000}, {1100,5000}]).
 -define(ETS, entropy_manager_ets).
+-define(EPOCH_ETS, entropy_manager_epoch_ets).
 
 %%%===================================================================
 %%% API
@@ -298,6 +299,8 @@ init([]) ->
                             {aae_throttle_limits, ?DEFAULT_AAE_THROTTLE_LIMITS},
                             {aae_throttle_enabled, true}),
     ?ETS = ets:new(?ETS, [named_table, {read_concurrency, true}]),
+    ?EPOCH_ETS = ets:new(?EPOCH_ETS, [named_table, ordered_set]),
+    initalize_epoch_ets(),
 
     schedule_tick(),
 
@@ -437,6 +440,12 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+initalize_epoch_ets() ->
+    {ok, R} = riak_core_ring_manager:get_my_ring(),
+    IndexNodes = riak_core_ring:all_owners(R),
+    List = [{Index, fun riak_kv_util:now_epoch/0} || {Index, _Node} <- IndexNodes],
+    ets:insert(?EPOCH_ETS, List).
 
 clear_all_exchanges(Exchanges) ->
     [begin

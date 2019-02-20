@@ -64,7 +64,8 @@
          index_2i_n/0,
          get_trees/1,
          get_version/1,
-         hashtree_itr_filter_expired/3]).
+         hashtree_itr_filter_expired/4,
+         get_hashtree_itr_filter_fun/1]).
 
 -export([poke/1,
          get_build_time/1]).
@@ -735,7 +736,7 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     State#state{trees=Trees2}.
 
 maybe_add_itr_filter_fun(?INDEX_2I_N) -> [];
-maybe_add_itr_filter_fun(_) -> [{itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}].
+maybe_add_itr_filter_fun(_) -> [{get_itr_filter_fun, fun ?MODULE:get_hashtree_itr_filter_fun/1}].
 
 %% This function never uses the Type field. Unsure why it is part of the API. Maybe was meant to be used
 %% by the background manager which could manage tokens based on Type atom. Best guess...
@@ -1225,31 +1226,38 @@ maybe_callback(Callback) ->
 %% The riak_object clock is hashed using phash2, which will return an int between 
 %% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
 %% need to know this size so we can match the epoch from the binary (if it has one).
-hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
+
+get_hashtree_itr_filter_fun(Index) ->
+    EpochOrFunction = riak_kv_entropy_manager:get_epoch(Index),
+    fun(K, V, T) ->
+        ?MODULE:hashtree_itr_filter_expired(K, V, T, EpochOrFunction)
+    end.
+
+hashtree_itr_filter_expired(K, V, T, Function) when is_function(Function) ->
+    hashtree_itr_filter_expired_helper(K, V, T, Function());
+hashtree_itr_filter_expired(K, V, T, Epoch) when is_integer(Epoch) ->
+    hashtree_itr_filter_expired_helper(K, V, T, Epoch).
+
+hashtree_itr_filter_expired_helper(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState, NowEpoch) ->
     IntSize = int_byte_size(IntVer),
     <<H:IntSize/binary, Epoch/binary>> = Bin,
-    maybe_filter_expired(K, H, Epoch, TreeState);
-hashtree_itr_filter_expired(K, H, _TreeState) ->
+    maybe_filter_expired(K, H, Epoch, TreeState, NowEpoch);
+hashtree_itr_filter_expired_helper(K, H, _TreeState, _NowEpoch) ->
     [{K,H}].
 
 %% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
 %% to the iterator in hashtree.
-maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
-maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
-    do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
+maybe_filter_expired(K, H, <<>>, _TreeState, _NowEpoch) -> [{K, H}];
+maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState, NowEpoch) ->
+    do_filter_expired(K, H, Epoch, TreeState, NowEpoch).
 
 %% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
 %% delete it from the hashtree and return an empty list to exclude it from the 
 %% hashtree itr, which means that it wont be exchanged with other replicas.
-do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
-do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
-    hashtree:delete(K, TreeState),
+do_filter_expired(K, H, Epoch, _TreeState, NowEpoch) when NowEpoch < Epoch -> [{K, H}];
+do_filter_expired(K, _H, _Epoch, TreeState, _NowEpoch) ->
+    hashtree:raw_delete(K, TreeState),
     [].
-
-now_epoch() ->
-    {M, S, _} = os:timestamp(),
-    Now = M * 1000000 + S,
-    Now.
 
 %% Determine the size of an int as per its erlang version byte. This can be 3 or
 %% 6 bytes.
