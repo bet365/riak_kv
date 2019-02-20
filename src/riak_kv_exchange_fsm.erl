@@ -348,9 +348,11 @@ do_timeout(State=#state{local=LocalVN,
 send_exchange_status(Status, #state{local=LocalVN,
                                     remote=RemoteVN,
                                     index_n=IndexN}) ->
+    riak_kv_entropy_manager:reset_epoch(LocalVN, RemoteVN),
     riak_kv_entropy_manager:exchange_status(LocalVN, RemoteVN, IndexN, Status).
 
-exchange_complete({LocalIdx, _}, {RemoteIdx, RemoteNode}, IndexN, Repaired) ->
+exchange_complete(LocalVN={LocalIdx, _}, RemoteVN={RemoteIdx, RemoteNode}, IndexN, Repaired) ->
+    riak_kv_entropy_manager:reset_epoch(LocalVN, RemoteVN),
     riak_kv_entropy_info:exchange_complete(LocalIdx, RemoteIdx, IndexN, Repaired),
     rpc:call(RemoteNode, riak_kv_entropy_info, exchange_complete,
              [RemoteIdx, LocalIdx, IndexN, Repaired]).

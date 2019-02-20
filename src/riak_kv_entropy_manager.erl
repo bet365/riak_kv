@@ -44,7 +44,11 @@
          get_partition_version/1,
          get_pending_version/0,
          get_upgraded/0,
-         get_trees_version/0]).
+         get_trees_version/0,
+         set_epoch/2,
+         get_epoch/1,
+         reset_epoch/2,
+         reset_epoch/1]).
 -export([all_pairwise_exchanges/2]).
 -export([throttle/0,
          get_aae_throttle/0,
@@ -287,6 +291,20 @@ cancel_exchange(Index) ->
 cancel_exchanges() ->
     gen_server:call(?MODULE, cancel_exchanges, infinity).
 
+set_epoch(Index, Now) ->
+    gen_server:call(?MODULE, {set_epoch, Index, Now}, infinity).
+
+get_epoch(Index) ->
+    gen_server:call(?MODULE, {get_epoch, Index}, infinity).
+
+reset_epoch({LocalIndex, _LocalNode}, {RemoteIndex, RemoteNode}) ->
+    reset_epoch(LocalIndex),
+    rpc:call(RemoteNode, ?MODULE, reset_epoch, [RemoteIndex], 30000).
+
+reset_epoch(Index) ->
+    gen_server:call(?MODULE, {reset_epoch, Index}, infinity).
+
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -376,6 +394,15 @@ handle_call(cancel_exchanges, _From, State=#state{exchanges=Exchanges}) ->
                    Index
                end || {Index, _Ref, Pid} <- Exchanges],
     {reply, Indices, State};
+handle_call({set_epoch, Index, Now}, _From, State) ->
+    set_epoch_for_exchange_helper(Index, Now),
+    {reply, ok, State};
+handle_call({get_epoch, Index}, _From, State) ->
+    [{Index, Epoch}] = ets:lookup(?EPOCH_ETS, Index),
+    {reply, Epoch, State};
+handle_call({reset_epoch, Index}, _From, State) ->
+    set_epoch_for_exchange_helper(Index, fun riak_kv_util:now_epoch/0),
+    {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -446,6 +473,19 @@ initalize_epoch_ets() ->
     IndexNodes = riak_core_ring:all_owners(R),
     List = [{Index, fun riak_kv_util:now_epoch/0} || {Index, _Node} <- IndexNodes],
     ets:insert(?EPOCH_ETS, List).
+
+set_epoch_for_exchange({LocalIndex, _LocalNode}, {RemoteIndex, RemoteNode}) ->
+    Now = riak_kv_util:now_epoch(),
+    set_epoch_for_exchange_helper(LocalIndex, Now),
+    try
+        rpc:call(RemoteNode, ?MODULE, set_epoch, [RemoteIndex, Now], 30000)
+    catch Type:Error ->
+        {Type, Error}
+    end.
+
+
+set_epoch_for_exchange_helper(Index, Epoch) ->
+    ets:insert(?EPOCH_ETS, {Index, Epoch}).
 
 clear_all_exchanges(Exchanges) ->
     [begin
@@ -900,15 +940,27 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                     State2 = requeue_exchange(LocalIdx, RemoteIdx, IndexN, State),
                     {not_built, State2};
                 {ok, Tree} ->
-                    case riak_kv_exchange_fsm:start(LocalVN, RemoteVN,
-                                                    IndexN, Tree, self()) of
-                        {ok, FsmPid} ->
-                            Ref = monitor(process, FsmPid),
-                            Exchanges = State#state.exchanges,
-                            Exchanges2 = [{LocalIdx, Ref, FsmPid} | Exchanges],
-                            {ok, State#state{exchanges=Exchanges2}};
-                        {error, Reason} ->
-                            {Reason, State}
+
+                    Result =
+                        case riak_core_capability:get({riak_kv, exchange_itr_filter_timestamp}, false) of
+                            true -> set_epoch_for_exchange(LocalVN, RemoteVN);
+                            false -> ok
+                        end,
+
+                    case Result of
+                        ok ->
+                            case riak_kv_exchange_fsm:start(LocalVN, RemoteVN,
+                                IndexN, Tree, self()) of
+                                {ok, FsmPid} ->
+                                    Ref = monitor(process, FsmPid),
+                                    Exchanges = State#state.exchanges,
+                                    Exchanges2 = [{LocalIdx, Ref, FsmPid} | Exchanges],
+                                    {ok, State#state{exchanges=Exchanges2}};
+                                {error, Reason} ->
+                                    {Reason, State}
+                            end;
+                        Error ->
+                            {error, Error}
                     end
             end;
         _ ->
