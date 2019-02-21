@@ -295,6 +295,7 @@ set_epoch({Index, Node}, Now) ->
     try
         gen_server:call({?MODULE, Node}, {set_epoch, Index, Now}, 30000)
     catch Type:Error ->
+        lager:error("Could not set_epoch on remote Node: ~p for Index: ~p", [Index, Node]),
         {Type, Error}
     end;
 set_epoch(Index, Now) ->
@@ -405,8 +406,14 @@ handle_call({set_epoch, Index, Now}, _From, State) ->
     set_epoch_for_exchange_helper(Index, Now),
     {reply, ok, State};
 handle_call({get_epoch, Index}, _From, State) ->
-    [{Index, Epoch}] = ets:lookup(?EPOCH_ETS, Index),
-    {reply, Epoch, State};
+    Res =
+        case ets:lookup(?EPOCH_ETS, Index) of
+            [{Index, Epoch}] -> Epoch;
+            _ ->
+                lager:error("Could not retrieve epoch for Index: ~p", [Index]),
+                riak_kv_util:now_epoch()
+        end,
+    {reply, Res, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
