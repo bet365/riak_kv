@@ -291,18 +291,25 @@ cancel_exchange(Index) ->
 cancel_exchanges() ->
     gen_server:call(?MODULE, cancel_exchanges, infinity).
 
+set_epoch({Index, Node}, Now) ->
+    try
+        gen_server:call({?MODULE, Node}, {set_epoch, Index, Now}, 30000)
+    catch Type:Error ->
+        {Type, Error}
+    end;
 set_epoch(Index, Now) ->
     gen_server:call(?MODULE, {set_epoch, Index, Now}, infinity).
 
 get_epoch(Index) ->
     gen_server:call(?MODULE, {get_epoch, Index}, infinity).
 
-reset_epoch({LocalIndex, _LocalNode}, {RemoteIndex, RemoteNode}) ->
-    reset_epoch(LocalIndex),
-    rpc:call(RemoteNode, ?MODULE, reset_epoch, [RemoteIndex], 30000).
+reset_epoch({LocalIndex, _LocalNode}, RemoteVN) ->
+    reset_epoch(LocalIndex), reset_epoch(RemoteVN).
 
+reset_epoch({Index, Node}) ->
+    gen_server:cast({?MODULE, Node}, {reset_epoch, Index});
 reset_epoch(Index) ->
-    gen_server:call(?MODULE, {reset_epoch, Index}, infinity).
+    gen_server:cast(?MODULE, {reset_epoch, Index}).
 
 
 %%%===================================================================
@@ -400,9 +407,6 @@ handle_call({set_epoch, Index, Now}, _From, State) ->
 handle_call({get_epoch, Index}, _From, State) ->
     [{Index, Epoch}] = ets:lookup(?EPOCH_ETS, Index),
     {reply, Epoch, State};
-handle_call({reset_epoch, Index}, _From, State) ->
-    set_epoch_for_exchange_helper(Index, fun riak_kv_util:now_epoch/0),
-    {reply, ok, State};
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -423,6 +427,9 @@ handle_cast(clear_trees, S) ->
 handle_cast(expire_trees, S) ->
     ok = expire_all_trees(S#state.trees),
     {noreply, S};
+handle_cast({reset_epoch, Index}, State) ->
+    set_epoch_for_exchange_helper(Index, fun riak_kv_util:now_epoch/0),
+    {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -474,14 +481,10 @@ initalize_epoch_ets() ->
     List = [{Index, fun riak_kv_util:now_epoch/0} || {Index, _Node} <- IndexNodes],
     ets:insert(?EPOCH_ETS, List).
 
-set_epoch_for_exchange({LocalIndex, _LocalNode}, {RemoteIndex, RemoteNode}) ->
+set_epoch_for_exchange({LocalIndex, _LocalNode}, RemoteVN) ->
     Now = riak_kv_util:now_epoch(),
     set_epoch_for_exchange_helper(LocalIndex, Now),
-    try
-        rpc:call(RemoteNode, ?MODULE, set_epoch, [RemoteIndex, Now], 30000)
-    catch Type:Error ->
-        {Type, Error}
-    end.
+    set_epoch(RemoteVN, Now).
 
 
 set_epoch_for_exchange_helper(Index, Epoch) ->
