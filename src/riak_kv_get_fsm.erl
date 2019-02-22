@@ -292,7 +292,8 @@ validate_quorum(_R, _ROpt, _N, _PR, _PROpt, _NumPrimaries, _NumVnodes) ->
 %% @private
 execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
                                    bkey=BKey, trace=Trace,
-                                   preflist2 = Preflist2}) ->
+                                   preflist2 = Preflist2,
+                                    options=Options}) ->
     TRef = schedule_timeout(Timeout),
     Preflist = [IndexNode || {IndexNode, _Type} <- Preflist2],
     case Trace of
@@ -303,7 +304,13 @@ execute(timeout, StateData0=#state{timeout=Timeout,req_id=ReqId,
         _ ->
             ok
     end,
-    riak_kv_vnode:get(Preflist, BKey, ReqId),
+      case lists:member({concurrent,true},Options) of
+        true ->
+           riak_kv_get_helper:get(Preflist, BKey, ReqId);
+      false ->
+            riak_kv_vnode:get(Preflist, BKey, ReqId)
+      end,
+
     StateData = StateData0#state{tref=TRef},
     new_state(waiting_vnode_r, StateData).
 

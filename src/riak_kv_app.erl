@@ -212,6 +212,7 @@ start(_Type, _StartArgs) ->
             %% synchronously.
             riak_core:register(riak_kv, [
                 {vnode_module, riak_kv_vnode},
+                {vnode_module, riak_kv_get_helper},
                 {bucket_validator, riak_kv_bucket},
                 {stat_mod, riak_kv_stat},
                 {permissions, [get, put, delete, list_keys, list_buckets,
