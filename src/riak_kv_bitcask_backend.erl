@@ -233,7 +233,7 @@ start(Partition, Config0) ->
                 {ok, DataDir} ->
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
-                    BitcaskOpts = set_mode(read_write, Config),
+                    BitcaskOpts = set_mode(Config),
                     case bitcask:open(BitcaskDir, BitcaskOpts) of
                         Ref when is_reference(Ref) ->
                             check_fcntl(),
@@ -711,6 +711,15 @@ data_directory_cleanup(DirPath) ->
         _ ->
             ignore
     end.
+
+%% @private
+set_mode(Config) ->
+	case lists:keyfind(backend_mode, 1, Config) of
+		{_, read_only} ->
+			set_mode(read_only, Config);
+		false ->
+			set_mode(read_write, Config)
+	end.
 
 %% @private
 set_mode(read_only, Config) ->
