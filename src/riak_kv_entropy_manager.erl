@@ -46,6 +46,7 @@
          get_upgraded/0,
          get_trees_version/0,
          set_epoch/2,
+         set_epoch/3,
          get_epoch/1,
          reset_epoch/2,
          reset_epoch/1]).
@@ -291,6 +292,12 @@ cancel_exchange(Index) ->
 cancel_exchanges() ->
     gen_server:call(?MODULE, cancel_exchanges, infinity).
 
+
+set_epoch(LocalVN, RemoteVN, Now) ->
+    {set_epoch(LocalVN, Now), set_epoch(RemoteVN, Now)}.
+
+set_epoch({Index, Node}, Now) when Node =:= node() ->
+    set_epoch(Index, Now);
 set_epoch({Index, Node}, Now) ->
     try
         gen_server:call({?MODULE, Node}, {set_epoch, Index, Now}, 30000)
@@ -299,18 +306,26 @@ set_epoch({Index, Node}, Now) ->
         {Type, Error}
     end;
 set_epoch(Index, Now) ->
-    gen_server:call(?MODULE, {set_epoch, Index, Now}, infinity).
+    case ets:insert(?EPOCH_ETS, {Index, Now}) of
+        true -> ok;
+        Error -> Error
+    end.
 
 get_epoch(Index) ->
-    gen_server:call(?MODULE, {get_epoch, Index}, infinity).
+    try
+        gen_server:call(?MODULE, {get_epoch, Index}, infinity)
+    catch _Type:_Error ->
+        lager:error("riak_kv_entropy_manager down, returned now_epoch fun"),
+        fun riak_kv_util:now_epoch/0
+    end.
 
-reset_epoch({LocalIndex, _LocalNode}, RemoteVN) ->
-    reset_epoch(LocalIndex), reset_epoch(RemoteVN).
+reset_epoch(LocalVN, RemoteVN) ->
+    {reset_epoch(LocalVN), reset_epoch(RemoteVN)}.
 
+reset_epoch({Index, Node}) when Node =:= node() ->
+    gen_server:cast(?MODULE, {reset_epoch, Index});
 reset_epoch({Index, Node}) ->
-    gen_server:cast({?MODULE, Node}, {reset_epoch, Index});
-reset_epoch(Index) ->
-    gen_server:cast(?MODULE, {reset_epoch, Index}).
+    gen_server:cast({?MODULE, Node}, {reset_epoch, Index}).
 
 
 %%%===================================================================
@@ -403,7 +418,7 @@ handle_call(cancel_exchanges, _From, State=#state{exchanges=Exchanges}) ->
                end || {Index, _Ref, Pid} <- Exchanges],
     {reply, Indices, State};
 handle_call({set_epoch, Index, Now}, _From, State) ->
-    set_epoch_for_exchange_helper(Index, Now),
+    set_epoch(Index, Now),
     {reply, ok, State};
 handle_call({get_epoch, Index}, _From, State) ->
     Res =
@@ -435,7 +450,7 @@ handle_cast(expire_trees, S) ->
     ok = expire_all_trees(S#state.trees),
     {noreply, S};
 handle_cast({reset_epoch, Index}, State) ->
-    set_epoch_for_exchange_helper(Index, fun riak_kv_util:now_epoch/0),
+    set_epoch(Index, fun riak_kv_util:now_epoch/0),
     {noreply, State};
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -488,14 +503,6 @@ initalize_epoch_ets() ->
     List = [{Index, fun riak_kv_util:now_epoch/0} || {Index, _Node} <- IndexNodes],
     ets:insert(?EPOCH_ETS, List).
 
-set_epoch_for_exchange({LocalIndex, _LocalNode}, RemoteVN) ->
-    Now = riak_kv_util:now_epoch(),
-    set_epoch_for_exchange_helper(LocalIndex, Now),
-    set_epoch(RemoteVN, Now).
-
-
-set_epoch_for_exchange_helper(Index, Epoch) ->
-    ets:insert(?EPOCH_ETS, {Index, Epoch}).
 
 clear_all_exchanges(Exchanges) ->
     [begin
@@ -953,12 +960,12 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
 
                     Result =
                         case riak_core_capability:get({riak_kv, exchange_itr_filter_timestamp}, false) of
-                            true -> set_epoch_for_exchange(LocalVN, RemoteVN);
-                            false -> ok
+                            true -> set_epoch(LocalVN, RemoteVN, riak_kv_util:now_epoch());
+                            false -> {ok, ok}
                         end,
 
                     case Result of
-                        ok ->
+                        {ok, ok} ->
                             case riak_kv_exchange_fsm:start(LocalVN, RemoteVN,
                                 IndexN, Tree, self()) of
                                 {ok, FsmPid} ->
@@ -970,6 +977,7 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                                     {Reason, State}
                             end;
                         Error ->
+                            reset_epoch(LocalVN, RemoteVN),
                             {Error, State}
                     end
             end;
