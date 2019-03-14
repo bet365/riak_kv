@@ -204,6 +204,16 @@ do_update({vnode_dt_update, Mod, Micros}) ->
     Type = riak_kv_crdt:from_mod(Mod),
     ok = create_or_update([P, ?APP, vnode, Type, update], 1, spiral),
     create_or_update([P, ?APP, vnode, Type, update, time], Micros, histogram);
+do_update({vnode_index_hashtree_calls, Idx, USecs}) ->
+    P = ?PFX,
+    ok = exometer:update([P, ?APP, vnode, index_hashtree_calls], 1),
+    ok = create_or_update([P, ?APP, vnode, puts, index_hashtree_calls], USecs, histogram),
+    do_per_index(index_hashtree_calls, Idx, USecs);
+do_update({vnode_index_hashtree_casts, Idx, USecs}) ->
+    P = ?PFX,
+    ok = exometer:update([P, ?APP, vnode, index_hashtree_casts], 1),
+    ok = create_or_update([P, ?APP, vnode, puts, index_hashtree_casts], USecs, histogram),
+    do_per_index(index_hashtree_casts, Idx, USecs);
 do_update({riak_object_merge, undefined, Micros}) ->
     P = ?PFX,
     ok = exometer:update([P, ?APP, object, merge], 1),
@@ -458,6 +468,23 @@ stats() ->
     Pfx = riak_core_stat:prefix(),
 
     [%% vnode stats
+
+        {[vnode, index_hashtree_calls], spiral, [], [{one  , vnode_index_hashtree_calls},
+                                                    {count, vnode_index_hashtree_calls_total}]},
+        {[vnode, index_hashtree_calls, time], histogram, [], [{mean  , vnode_index_hashtree_calls_mean},
+            {median, vnode_index_hashtree_calls_time_median},
+            {95    , vnode_index_hashtree_calls_time_95},
+            {99    , vnode_index_hashtree_calls_time_99},
+            {max   , vnode_index_hashtree_calls_time_100}]},
+
+        {[vnode, index_hashtree_casts], spiral, [], [{one  , vnode_index_hashtree_casts},
+            {count, vnode_index_hashtree_casts_total}]},
+        {[vnode, index_hashtree_casts, time], histogram, [], [{mean  , vnode_index_hashtree_casts_mean},
+            {median, vnode_index_hashtree_casts_time_median},
+            {95    , vnode_index_hashtree_casts_time_95},
+            {99    , vnode_index_hashtree_casts_time_99},
+            {max   , vnode_index_hashtree_casts_time_100}]},
+
      {[vnode, gets], spiral, [], [{one  , vnode_gets},
                                   {count, vnode_gets_total}]},
      {[vnode, gets, time], histogram, [], [{mean  , vnode_get_fsm_time_mean},

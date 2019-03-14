@@ -2144,14 +2144,16 @@ update_hashtree(_Bucket, _Key, _RObj, #state{hashtrees=undefined}) ->
 update_hashtree(Bucket, Key, BinObj, State) when is_binary(BinObj) ->
     RObj = riak_object:from_binary(Bucket, Key, BinObj),
     update_hashtree(Bucket, Key, RObj, State);
-update_hashtree(Bucket, Key, RObj, #state{hashtrees=Trees}) ->
+update_hashtree(Bucket, Key, RObj, #state{hashtrees=Trees, idx=Idx}) ->
     Items = [{object, {Bucket, Key}, RObj}],
     case get_hashtree_token() of
         true ->
-            riak_kv_index_hashtree:async_insert(Items, [], Trees),
+            {ok, T} = timer:tc(fun() -> riak_kv_index_hashtree:async_insert(Items, [], Trees) end),
+            ok = riak_kv_stat:update({vnode_index_hashtree_casts, Idx, T}),
             ok;
         false ->
-            riak_kv_index_hashtree:insert(Items, [], Trees),
+            {ok, T} = timer:tc(fun() -> riak_kv_index_hashtree:insert(Items, [], Trees) end),
+            ok = riak_kv_stat:update({vnode_index_hashtree_calls, Idx, T}),
             put(hashtree_tokens, max_hashtree_tokens()),
             ok
     end.
