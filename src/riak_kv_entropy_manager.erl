@@ -954,7 +954,7 @@ start_exchange(LocalVN, {RemoteIdx, IndexN}, Ring, State) ->
             {ok, State}
     end.
 
-start_exchange(LocalVN, RemoteVN, IndexN, Ring, State#state{exchange_itr_filter_timestamp = ExchangeFun}) ->
+start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
     {LocalIdx, _} = LocalVN,
     {RemoteIdx, _} = RemoteVN,
     case riak_core_ring:vnode_type(Ring, LocalIdx) of
@@ -972,7 +972,7 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State#state{exchange_itr_filter_
                 {ok, Tree} ->
 
                     Result =
-                        case ExchangeFun of
+                        case State#state.exchange_itr_filter_timestamp of
                             true -> set_epoch(LocalVN, RemoteVN, riak_kv_util:now_epoch());
                             false -> {ok, ok}
                         end,
