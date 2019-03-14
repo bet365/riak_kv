@@ -91,7 +91,8 @@
                 vnode_status_pid = undefined :: 'undefined' | pid(),
                 last_throttle  = undefined :: 'undefined' | non_neg_integer(),
                 version        = legacy :: version(),
-                pending_version = legacy :: version()
+                pending_version = legacy :: version(),
+                exchange_itr_filter_timestamp = false :: boolean()
                }).
 
 -type state() :: #state{}.
@@ -353,12 +354,14 @@ init([]) ->
                    automatic
            end,
     set_debug(proplists:is_defined(debug, Opts)),
+    CoreCap = riak_core_capability:get({riak_kv, exchange_itr_filter_timestamp}, false),
     State = #state{mode=Mode,
                    trees=[],
                    tree_queue=[],
                    locks=[],
                    exchanges=[],
-                   exchange_queue=[]},
+                   exchange_queue=[],
+                   exchange_itr_filter_timestamp = CoreCap},
     State2 = reset_build_tokens(State),
     schedule_reset_build_tokens(),
     {ok, State2}.
@@ -732,7 +735,17 @@ tick(State) ->
                                  maybe_poke_tree(S)
                          end, State3, lists:seq(1,10)),
     State5 = maybe_exchange(Ring, State4),
-    State5.
+    State6 = maybe_check_core_capability(State5),
+    State6.
+
+maybe_check_core_capability(State = #state{exchange_itr_filter_timestamp = true}) ->
+    State;
+maybe_check_core_capability(State = #state{exchange_itr_filter_timestamp = false}) ->
+    CoreCap = riak_core_capability:get({riak_kv, exchange_itr_filter_timestamp}, false),
+    case CoreCap of
+        true -> State#state{exchange_itr_filter_timestamp = true};
+        false -> State
+    end.
 
 -spec maybe_poke_tree(state()) -> state().
 maybe_poke_tree(State=#state{trees=[]}) ->
@@ -941,7 +954,7 @@ start_exchange(LocalVN, {RemoteIdx, IndexN}, Ring, State) ->
             {ok, State}
     end.
 
-start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
+start_exchange(LocalVN, RemoteVN, IndexN, Ring, State#state{exchange_itr_filter_timestamp = ExchangeFun}) ->
     {LocalIdx, _} = LocalVN,
     {RemoteIdx, _} = RemoteVN,
     case riak_core_ring:vnode_type(Ring, LocalIdx) of
@@ -959,7 +972,7 @@ start_exchange(LocalVN, RemoteVN, IndexN, Ring, State) ->
                 {ok, Tree} ->
 
                     Result =
-                        case riak_core_capability:get({riak_kv, exchange_itr_filter_timestamp}, false) of
+                        case ExchangeFun of
                             true -> set_epoch(LocalVN, RemoteVN, riak_kv_util:now_epoch());
                             false -> {ok, ok}
                         end,
