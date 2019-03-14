@@ -2148,12 +2148,12 @@ update_hashtree(Bucket, Key, RObj, #state{hashtrees=Trees, idx=Idx}) ->
     Items = [{object, {Bucket, Key}, RObj}],
     case get_hashtree_token() of
         true ->
-            {ok, T} = timer:tc(fun() -> riak_kv_index_hashtree:async_insert(Items, [], Trees) end),
-            ok = riak_kv_stat:update({vnode_index_hashtree_casts, Idx, T}),
+            {T, _} = timer:tc(fun() -> riak_kv_index_hashtree:async_insert(Items, [], Trees) end),
+            ok = riak_kv_stat:update({vnode_index_hashtree_casts, Idx, T/1000}),
             ok;
         false ->
-            {ok, T} = timer:tc(fun() -> riak_kv_index_hashtree:insert(Items, [], Trees) end),
-            ok = riak_kv_stat:update({vnode_index_hashtree_calls, Idx, T}),
+            {T, _} = timer:tc(fun() -> riak_kv_index_hashtree:insert(Items, [], Trees) end),
+            ok = riak_kv_stat:update({vnode_index_hashtree_calls, Idx, T/1000}),
             put(hashtree_tokens, max_hashtree_tokens()),
             ok
     end.
