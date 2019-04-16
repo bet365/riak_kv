@@ -139,14 +139,19 @@ start_link(ReqId,RObj,W,DW,Timeout,ResultPid,Options) ->
 
 start(From, Object, PutOptions) ->
     Args = [From, Object, PutOptions],
-    case sidejob_supervisor:start_child(riak_kv_put_fsm_sj,
-                                        gen_fsm, start_link,
-                                        [?MODULE, Args, []]) of
-        {error, overload} ->
-            riak_kv_util:overload_reply(From),
-            {error, overload};
-        {ok, Pid} ->
-            {ok, Pid}
+    case app_helper:get_env(riak_kv, overload_protection, false) of
+        true ->
+            case sidejob_supervisor:start_child(riak_kv_put_fsm_sj,
+                gen_fsm, start_link,
+                [?MODULE, Args, []]) of
+                {error, overload} ->
+                    riak_kv_util:overload_reply(From),
+                    {error, overload};
+                {ok, Pid} ->
+                    {ok, Pid}
+            end;
+        false ->
+            gen_fsm:start_link(?MODULE, Args, [])
     end.
 
 %% Included for backward compatibility, in case someone is, say, passing around

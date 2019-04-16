@@ -105,14 +105,19 @@ start_link(ReqId,Bucket,Key,R,Timeout,From) ->
 -spec start({raw, req_id(), pid()}, binary(), binary(), options()) -> {ok, pid()} | {error, any()}.
 start(From, Bucket, Key, GetOptions) ->
     Args = [From, Bucket, Key, GetOptions],
-    case sidejob_supervisor:start_child(riak_kv_get_fsm_sj,
-                                        gen_fsm, start_link,
-                                        [?MODULE, Args, []]) of
-        {error, overload} ->
-            riak_kv_util:overload_reply(From),
-            {error, overload};
-        {ok, Pid} ->
-            {ok, Pid}
+    case app_helper:get_env(riak_kv, overload_protection, false) of
+        true ->
+            case sidejob_supervisor:start_child(riak_kv_get_fsm_sj,
+                gen_fsm, start_link,
+                [?MODULE, Args, []]) of
+                {error, overload} ->
+                    riak_kv_util:overload_reply(From),
+                    {error, overload};
+                {ok, Pid} ->
+                    {ok, Pid}
+            end;
+        false ->
+            gen_fsm:start_link(?MODULE, Args, [])
     end.
 
 %% Included for backward compatibility, in case someone is, say, passing around
