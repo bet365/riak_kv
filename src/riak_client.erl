@@ -505,6 +505,9 @@ list_keys(Bucket, {?MODULE, [_Node, _ClientId]}=THIS) ->
 list_keys(Bucket, Timeout, {?MODULE, [_Node, _ClientId]}=THIS) ->
     list_keys(Bucket, none, Timeout, THIS).
 
+list_keys(Bucket, Filter, Timeout, {?MODULE, [_Node, _ClientId]}=THIS) ->
+    list_keys(Bucket, Filter, Timeout, false, THIS).
+
 %% @spec list_keys(riak_object:bucket(), Filter :: term(),
 %% TimeoutMillisecs :: integer(), riak_client()) ->
 %%       {ok, [Key :: riak_object:key()]} |
@@ -513,7 +516,7 @@ list_keys(Bucket, Timeout, {?MODULE, [_Node, _ClientId]}=THIS) ->
 %% @doc List the keys known to be present in Bucket.
 %%      Key lists are updated asynchronously, so this may be slightly
 %%      out of date if called immediately after a put or delete.
-list_keys(Bucket, Filter, Timeout0, {?MODULE, [Node, _ClientId]}) ->
+list_keys(Bucket, Filter, Timeout0, TombstoneFlag, {?MODULE, [Node, _ClientId]}) ->
     Timeout =
         case Timeout0 of
             T when is_integer(T) -> T;
@@ -521,7 +524,7 @@ list_keys(Bucket, Filter, Timeout0, {?MODULE, [Node, _ClientId]}) ->
         end,
     Me = self(),
     ReqId = mk_reqid(),
-    riak_kv_keys_fsm_sup:start_keys_fsm(Node, [{raw, ReqId, Me}, [Bucket, Filter, Timeout]]),
+    riak_kv_keys_fsm_sup:start_keys_fsm(Node, [{raw, ReqId, Me}, [Bucket, Filter, Timeout, TombstoneFlag]]),
     wait_for_listkeys(ReqId).
 
 stream_list_keys(Bucket, {?MODULE, [_Node, _ClientId]}=THIS) ->

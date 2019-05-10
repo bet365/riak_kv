@@ -37,6 +37,12 @@
           bucket :: binary() | tuple(),
           item_filter :: function()}).
 
+%% same as _v4, but contains trigger for returning Tombstones
+-record(riak_kv_listkeys_req_v5, {
+    bucket :: binary() | tuple(),
+    item_filter :: function(),
+    return_tombstone :: boolean()}).
+
 -record(riak_kv_listbuckets_req_v1, {
           item_filter :: function()}).
 
@@ -72,7 +78,7 @@
 -define(KV_W1C_PUT_REPLY, #riak_kv_w1c_put_reply_v1).
 -define(KV_GET_REQ, #riak_kv_get_req_v1).
 -define(KV_LISTBUCKETS_REQ, #riak_kv_listbuckets_req_v1).
--define(KV_LISTKEYS_REQ, #riak_kv_listkeys_req_v4).
+-define(KV_LISTKEYS_REQ, #riak_kv_listkeys_req_v5).
 -define(KV_INDEX_REQ, #riak_kv_index_req_v2).
 -define(KV_VNODE_STATUS_REQ, #riak_kv_vnode_status_req_v1).
 -define(KV_DELETE_REQ, #riak_kv_delete_req_v1).

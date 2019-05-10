@@ -390,6 +390,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
+    TombstoneFlag = proplists:get_value(return_tombstone, Opts, false),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -398,7 +399,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask:fold_keys(Ref1, FoldFun, Acc)
+                                    bitcask:fold_keys(Ref1, FoldFun, Acc, TombstoneFlag)
                                 after
                                     bitcask:close(Ref1)
                                 end;
@@ -408,7 +409,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, KeyFolder};
         false ->
-            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc),
+            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc, TombstoneFlag),
             case FoldResult of
                 {error, _} ->
                     FoldResult;

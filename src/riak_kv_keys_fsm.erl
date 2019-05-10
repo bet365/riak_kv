@@ -43,7 +43,7 @@
          process_results/2,
          finish/2]).
 -export([use_ack_backpressure/0,
-         req/2,
+         req/3,
          ack_keys/1]).
 
 -type from() :: {atom(), req_id(), pid()}.
@@ -62,12 +62,13 @@ use_ack_backpressure() ->
     riak_core_capability:get({riak_kv, listkeys_backpressure}, false) == true.
 
 %% @doc Construct the correct listkeys command record.
--spec req(binary(), term()) -> term().
-req(Bucket, ItemFilter) ->
+-spec req(binary(), term(), boolean()) -> term().
+req(Bucket, ItemFilter, TombstoneFlag) ->
     case use_ack_backpressure() of
         true ->
             ?KV_LISTKEYS_REQ{bucket=Bucket,
-                             item_filter=ItemFilter};
+                             item_filter=ItemFilter,
+                             return_tombstone = TombstoneFlag};
         false ->
             #riak_kv_listkeys_req_v3{bucket=Bucket,
                                      item_filter=ItemFilter}
@@ -77,7 +78,7 @@ req(Bucket, ItemFilter) ->
 %% the number of primary preflist vnodes the operation
 %% should cover, the service to use to check for available nodes,
 %% and the registered name to use to access the vnode master process.
-init(From={_, _, ClientPid}, [Bucket, ItemFilter, Timeout]) ->
+init(From={_, _, ClientPid}, [Bucket, ItemFilter, Timeout, TombstoneFlag]) ->
     riak_core_dtrace:put_tag(io_lib:format("~p", [Bucket])),
     ClientNode = atom_to_list(node(ClientPid)),
     PidStr = pid_to_list(ClientPid),
@@ -92,7 +93,7 @@ init(From={_, _, ClientPid}, [Bucket, ItemFilter, Timeout]) ->
     BucketProps = riak_core_bucket:get_bucket(Bucket),
     NVal = proplists:get_value(n_val, BucketProps),
     %% Construct the key listing request
-    Req = req(Bucket, ItemFilter),
+    Req = req(Bucket, ItemFilter, TombstoneFlag),
     {Req, all, NVal, 1, riak_kv, riak_kv_vnode_master, Timeout,
      #state{from=From}}.
 
