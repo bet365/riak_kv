@@ -30,7 +30,7 @@
 -export([delete/3,delete/4,delete/5]).
 -export([delete_vclock/4,delete_vclock/5,delete_vclock/6]).
 -export([list_keys/2,list_keys/3,list_keys/4, list_keys/5]).
--export([stream_list_keys/2,stream_list_keys/3,stream_list_keys/4]).
+-export([stream_list_keys/2,stream_list_keys/3,stream_list_keys/4, stream_list_keys/5]).
 -export([filter_buckets/2]).
 -export([filter_keys/3,filter_keys/4]).
 -export([list_buckets/1,list_buckets/2,list_buckets/3, list_buckets/4]).
@@ -528,13 +528,15 @@ list_keys(Bucket, Filter, Timeout0, TombstoneFlag, {?MODULE, [Node, _ClientId]})
     wait_for_listkeys(ReqId).
 
 stream_list_keys(Bucket, {?MODULE, [_Node, _ClientId]}=THIS) ->
-    stream_list_keys(Bucket, ?DEFAULT_TIMEOUT, THIS).
+    stream_list_keys(Bucket, ?DEFAULT_TIMEOUT, false, THIS).
 
 stream_list_keys(Bucket, undefined, {?MODULE, [_Node, _ClientId]}=THIS) ->
-    stream_list_keys(Bucket, ?DEFAULT_TIMEOUT, THIS);
-stream_list_keys(Bucket, Timeout, {?MODULE, [_Node, _ClientId]}=THIS) ->
+    stream_list_keys(Bucket, ?DEFAULT_TIMEOUT, false, THIS);
+stream_list_keys(Bucket, TombstoneFlag, {?MODULE, [_Node, _ClientId]}=THIS) when is_boolean(TombstoneFlag) ->
+    stream_list_keys(Bucket, ?DEFAULT_TIMEOUT, TombstoneFlag, THIS).
+stream_list_keys(Bucket, Timeout, TombstoneFlag, {?MODULE, [_Node, _ClientId]}=THIS) ->
     Me = self(),
-    stream_list_keys(Bucket, Timeout, Me, THIS).
+    stream_list_keys(Bucket, Timeout, Me, TombstoneFlag, THIS).
 
 %% @spec stream_list_keys(riak_object:bucket(),
 %%                        TimeoutMillisecs :: integer(),
@@ -549,7 +551,7 @@ stream_list_keys(Bucket, Timeout, {?MODULE, [_Node, _ClientId]}=THIS) ->
 %%      and a final {ReqId, done} message.
 %%      None of the Keys lists will be larger than the number of
 %%      keys in Bucket on any single vnode.
-stream_list_keys(Input, Timeout, Client, {?MODULE, [Node, _ClientId]}) when is_pid(Client) ->
+stream_list_keys(Input, Timeout, Client, TombstoneFlag, {?MODULE, [Node, _ClientId]}) when is_pid(Client) ->
     ReqId = mk_reqid(),
     case Input of
         %% buckets with bucket types are also a 2-tuple, so be careful not to
@@ -565,7 +567,7 @@ stream_list_keys(Input, Timeout, Client, {?MODULE, [Node, _ClientId]}) when is_p
                                                           Client},
                                                          [Bucket,
                                                           FilterExprs,
-                                                          Timeout]]),
+                                                          Timeout, TombstoneFlag]]),
                     {ok, ReqId}
             end;
         Bucket ->
@@ -573,7 +575,7 @@ stream_list_keys(Input, Timeout, Client, {?MODULE, [Node, _ClientId]}) when is_p
                                                 [{raw, ReqId, Client},
                                                  [Bucket,
                                                   none,
-                                                  Timeout]]),
+                                                  Timeout, TombstoneFlag]]),
             {ok, ReqId}
     end.
 
