@@ -945,7 +945,7 @@ handle_coverage(#riak_kv_listkeys_req_v3{bucket=Bucket,
     handle_coverage_keyfold(Bucket, ItemFilter, ResultFun,
                             FilterVNodes, Sender, Opts, State);
 handle_coverage(?KV_LISTKEYS_REQ{bucket=Bucket,
-                                 item_filter=ItemFilter
+                                 item_filter=ItemFilter,
                                  return_tombstone = TombstoneFlag},
                 FilterVNodes, Sender, State) ->
     %% v4 == ack-based backpressure

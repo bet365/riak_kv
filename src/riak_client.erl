@@ -29,7 +29,7 @@
 -export([put/2,put/3,put/4,put/5,put/6]).
 -export([delete/3,delete/4,delete/5]).
 -export([delete_vclock/4,delete_vclock/5,delete_vclock/6]).
--export([list_keys/2,list_keys/3,list_keys/4]).
+-export([list_keys/2,list_keys/3,list_keys/4, list_keys/5]).
 -export([stream_list_keys/2,stream_list_keys/3,stream_list_keys/4]).
 -export([filter_buckets/2]).
 -export([filter_keys/3,filter_keys/4]).

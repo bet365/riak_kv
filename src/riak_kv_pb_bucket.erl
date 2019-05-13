@@ -118,12 +118,12 @@ determine_class_and_listing(#rpblistkeysreq{}) ->
     %% at present list-keys always streams
     {{riak_kv, stream_list_keys}, keys}.
 
-maybe_stream_list_keys(#rpblistkeysreq{type = Type, bucket = B, timeout = T, return_tombstone = TR} = Req,
+maybe_stream_list_keys(#rpblistkeysreq{type = Type, bucket = B, timeout = T} = Req,
                        #state{client = Client} = State) ->
     case check_bucket_type(Type) of
         {ok, GoodType} ->
             Bucket = maybe_create_bucket_type(GoodType, B),
-            {ok, ReqId} = Client:stream_list_keys(Bucket, T, TR),
+            {ok, ReqId} = Client:stream_list_keys(Bucket, T),
             {reply, {stream, ReqId}, State#state{req = Req, req_ctx = ReqId}};
         error ->
             error_no_bucket_type(Type, State)
