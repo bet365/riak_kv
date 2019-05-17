@@ -80,10 +80,10 @@ register_stat(Name, Type) ->
 %% gen_server:call(?SERVER, {register, Name, Type}).
 
 update(Arg) ->
-    case app_helper:get_env(?APP, stat) of
-      stats_off ->
-        ok;
-      stats_on ->
+  case app_helper:get_env(riak_stats, ?MODULE, true) of
+    false ->
+      ok;
+    true ->
         maybe_dispatch_to_sidejob(erlang:module_loaded(riak_kv_stat_sj), Arg)
     end.
 
