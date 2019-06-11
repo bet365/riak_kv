@@ -1041,7 +1041,7 @@ get_max_local_vnodeq() ->
     try
 	{ok, [{max,M}]} =
 	    exometer:get_value(
-	      [riak_core_stat:prefix(),riak_core,vnodeq,riak_kv_vnode],
+	      [riak_stat_mngr:prefix(),riak_core,vnodeq,riak_kv_vnode],
 	      [max]),
 	{M, node()}
     catch _X:_Y ->
