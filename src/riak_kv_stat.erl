@@ -122,7 +122,7 @@ active_puts() ->
   counter_value([?PFX, ?APP, node, puts, fsm, active]).
 
 counter_value(Name) ->
-  case exometer:get_value(Name, [value]) of % TODO: Change
+  case riak_stat_mngr:get_stat(Name, [value]) of
     {ok, [{value, N}]} ->
       N;
     _ ->
@@ -226,7 +226,6 @@ do_update({get_fsm, Bucket, Microsecs, Stages, undefined, undefined, PerBucket, 
   ok = do_stages([node, gets, time], Stages),
   do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, undefined, undefined});
 do_update({get_fsm, Bucket, Microsecs, Stages, NumSiblings, ObjSize, PerBucket, undefined}) ->
-  P = riak_stat_mngr:prefix(),
   update_stats([
     {[node, gets], 1},
     {[node, gets, time], Microsecs},
@@ -250,7 +249,7 @@ do_update({get_fsm, Bucket, Microsecs, Stages, NumSiblings, ObjSize, PerBucket, 
   do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type});
 do_update({put_fsm_time, Bucket, Microsecs, Stages, PerBucket, undefined}) ->
   update_stats([{[node, puts], 1},
-                {[node, puts, time], Microsecs}]),
+    {[node, puts, time], Microsecs}]),
   ok = do_stages([node, puts, time], Stages),
   do_put_bucket(PerBucket, {Bucket, Microsecs, Stages});
 do_update({put_fsm_time, Bucket, Microsecs, Stages, PerBucket, CRDTMod}) ->
@@ -285,14 +284,14 @@ do_update({fsm_error, Type}) when Type =:= gets; Type =:= puts ->
   update_stats([node, Type, fsm, errors], 1);
 do_update({index_create, Pid}) ->
   update_stats([{[index, fsm, create], 1},
-                {[index, fsm, active], 1}]),
+    {[index, fsm, active], 1}]),
   add_monitor(index, Pid),
   ok;
 do_update(index_create_error) ->
   update_stats([index, fsm, create, error], 1);
 do_update({list_create, Pid}) ->
   update_stats([{[list, fsm, create], 1},
-                {[list, fsm, active], 1}]),
+    {[list, fsm, active], 1}]),
   add_monitor(list, Pid),
   ok;
 do_update(list_create_error) ->
@@ -303,7 +302,7 @@ do_update({Type, actor_count, Count}) ->
   update_stats([Type, actor_count], Count);
 do_update({Type, bytes, Bytes}) ->
   update_stats([{[Type, bytes], Bytes},
-                {[Type, bytes, total], Bytes}]);
+    {[Type, bytes, total], Bytes}]);
 do_update(late_put_fsm_coordinator_ack) ->
   update_stats([late_put_fsm_coordinator_ack], 1);
 do_update({consistent_get, _Bucket, Microsecs, undefined}) ->
@@ -344,7 +343,6 @@ monitor_loop(Type) ->
 %% Per index stats (by op)
 do_per_index(Op, Idx, USecs) ->
   IdxAtom = list_to_atom(integer_to_list(Idx)),
-  P = riak_stat_mngr:prefix(),
   create_or_update([vnode, Op, IdxAtom], 1, spiral),
   create_or_update([vnode, Op, time, IdxAtom], USecs, histogram).
 
@@ -360,7 +358,6 @@ unregister_per_index(Op, Idx) ->
 do_get_bucket(false, _) ->
   ok;
 do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize} = Args) ->
-  P = riak_stat_mngr:prefix(),
   case update_stats([node, gets, Bucket], 1) of
     ok ->
       Stats = [{[node, gets, Dimension, Bucket], Arg}
@@ -376,7 +373,6 @@ do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize} = Args) ->
       do_get_bucket(true, Args)
   end;
 do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type} = Args) ->
-  P = riak_stat_mngr:prefix(),
   case update_stats([node, gets, Type, Bucket], 1) of
     ok ->
       Stats = [{[node, gets, Dimension, Bucket], Arg}
@@ -396,19 +392,17 @@ do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type} = Ar
 do_put_bucket(false, _) ->
   ok;
 do_put_bucket(true, {Bucket, Microsecs, Stages} = Args) ->
-  P = riak_stat_mngr:prefix(),
   case update_stats([node, puts, Bucket], 1) of
     ok ->
-      update_stats([node, puts, time, Bucket], Microsecs), %
-      do_stages([node, puts, time, Bucket], Stages); % TODO: investigate
+      update_stats([node, puts, time, Bucket], Microsecs),
+      do_stages([node, puts, time, Bucket], Stages);
     {error, _} ->
       register_stats([
         {[node, puts, Bucket], spiral},
         {[node, puts, time, Bucket], histogram}]),
-      do_put_bucket(true, Args) % TODO: investigate
+      do_put_bucket(true, Args)
   end;
 do_put_bucket(true, {Bucket, Microsecs, Stages, Type} = Args) ->
-  P = riak_stat_mngr:prefix(),
   case update_stats([node, puts, Type, Bucket], 1) of
     ok ->
       update_stats([node, puts, Type, time, Bucket], Microsecs),
@@ -416,7 +410,7 @@ do_put_bucket(true, {Bucket, Microsecs, Stages, Type} = Args) ->
     {error, not_found} ->
       register_stats([{[node, puts, Type, Bucket], spiral},
         {[node, puts, Type, time, Bucket], histogram}]),
-      do_put_bucket(true, Args) % TODO: investigate
+      do_put_bucket(true, Args)
   end.
 
 
@@ -437,7 +431,6 @@ do_stages(Path, [{Stage, Time} | Stages]) ->
 %% The indexes are from get core [{Index, Reason::notfound|outofdate}]
 %% preflist is a preflist of [{{Index, Node}, Type::primary|fallback}]
 do_repairs(Indices, Preflist) ->
-  Pfx = riak_stat_mngr:prefix(),
   lists:foreach(fun({{Idx, Node}, Type}) ->
     case proplists:get_value(Idx, Indices) of
       undefined ->
@@ -462,7 +455,7 @@ new(Name, Arg) ->
 %% for dynamically created / dimensioned stats
 %% that can't be registered at start up
 create_or_update(Name, UpdateVal, Type) ->
-  riak_stat_mngr:update(?APP, Name, UpdateVal, Type). % TODO: add ?APP sanitise @ mngr
+  riak_stat_mngr:update(?APP, Name, UpdateVal, Type).
 
 %% @doc list of {Name, Type} for static
 %% stats that we can register at start up
