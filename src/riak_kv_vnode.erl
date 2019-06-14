@@ -44,6 +44,7 @@
          repair/1,
          repair_status/1,
          repair_filter/1,
+         update_metadata/2,
          hashtree_pid/1,
          rehash/3,
          refresh_index_data/4,
@@ -408,6 +409,14 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
+update_metadata({{{split_backend, bitcask}, Key}, _MD} = FullKey, Partition) when Key =/= default ->
+    riak_core_vnode_master:sync_command({Partition, node()},
+        {update_metadata, Partition, FullKey, node()},
+        riak_kv_vnode_master,
+        infinity);
+update_metadata(_, _) ->
+    ok.
+
 -spec hashtree_pid(index()) -> {ok, pid()} | {error, wrong_node}.
 hashtree_pid(Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
@@ -478,6 +487,10 @@ init([Index]) ->
     DeleteMode = app_helper:get_env(riak_kv, delete_mode, 3000),
     AsyncFolding = app_helper:get_env(riak_kv, async_folds, true) == true,
     MDCacheSize = app_helper:get_env(riak_kv, vnode_md_cache_size),
+
+    CallbackFun = fun(Key) -> riak_kv_vnode:update_metadata(Key, Index) end,
+    riak_core_metadata_events:add_sup_callback(CallbackFun),
+
     MDCache =
         case MDCacheSize of
             N when is_integer(N),
@@ -656,6 +669,18 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
                           FoldFun({Bucket, Key}, Value, Acc)
                   end,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
+
+handle_command({update_metadata, Partition, {{Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
+    Config = riak_core_metadata:get(Prefix, Key),
+    FinalConf = case Config of
+		undefined ->
+			get_backend_config(Key);
+		_ ->
+			Config
+	end,
+    {ok, NewState} = riak_kv_split_backend:start_additional_backends(Partition, FinalConf, ModState),
+    NewState1 = State#state{modstate = NewState},
+    {reply, ok, NewState1};
 
 %% entropy exchange commands
 handle_command({hashtree_pid, Node}, _, State=#state{hashtrees=HT}) ->
@@ -967,7 +992,16 @@ handle_coverage(?KV_INDEX_REQ{bucket=Bucket,
     handle_coverage_index(Bucket, ItemFilter, Query,
                           FilterVNodes, Sender, State, fun result_fun_ack/2).
 
--spec prepare_index_query(?KV_INDEX_Q{}) -> ?KV_INDEX_Q{}.
+get_backend_config(Name) ->
+    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, bitcask}, default),
+    {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
+    DataRoot = re:replace(S, binary_to_list(DefName), atom_to_list(Name), [{return, list}]),
+    NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
+    {atom_to_binary(Name, latin1), Mod, NewModConf}.
+
+
+
+    -spec prepare_index_query(?KV_INDEX_Q{}) -> ?KV_INDEX_Q{}.
 prepare_index_query(#riak_kv_index_v3{term_regex=RE} = Q) when
         RE =/= undefined ->
     {ok, CompiledRE} = re:compile(RE),

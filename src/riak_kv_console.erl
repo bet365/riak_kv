@@ -44,7 +44,9 @@
          bucket_type_create/1,
          bucket_type_update/1,
          bucket_type_reset/1,
-         bucket_type_list/1]).
+         bucket_type_list/1,
+         add_split_backend/2
+]).
 
 -export([ensemble_status/1]).
 
@@ -609,6 +611,18 @@ bucket_type_is_first(It, false) ->
             bucket_type_is_first(riak_core_bucket_type:itr_next(It), Active)
     end.
 
+add_split_backend(Type, Name) ->
+    case Type of
+        bitcask ->
+            Config = get_backend_config(Name, Type),
+            riak_core_metadata:put({split_backend, Type}, Name, Config);
+        leveldb ->
+            Config = get_backend_config(Name, Type),
+            riak_core_metadata:put({split_backend, Type}, Name, Config);
+        _ ->
+            error
+    end.
+
 repair_2i(["status"]) ->
     try
         Status = riak_kv_2i_aae:get_status(),
@@ -843,3 +857,10 @@ bucket_error_xlate({Property, Error}) ->
     [atom_to_list(Property), ": ", io_lib:format("~p", [Error])];
 bucket_error_xlate(X) ->
     io_lib:format("~p", [X]).
+
+get_backend_config(Name, Type) ->
+    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
+    {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
+    DataRoot = re:replace(S, binary_to_list(DefName), atom_to_list(Name), [{return, list}]),
+    NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
+    {atom_to_binary(Name, latin1), Mod, NewModConf}.
