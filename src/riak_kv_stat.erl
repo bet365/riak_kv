@@ -31,6 +31,10 @@
 %%      get_stats/0. Or use folsom_metrics:get_metric_value/1,
 %%      or riak_core_stat_q:get_stats/1.
 %%
+%%  June 2019 ->
+%%      - removed exometer:new/3 calls, instead used exometer:re_register/3
+%%      - removed exometer:update and replaced all with the exometer:update_or_create
+%%        function which serves a similar functionality.
 
 -module(riak_kv_stat).
 
@@ -48,7 +52,7 @@
   leveldb_read_block_errors/0, stat_update_error/3, stop/0]).
 -export([track_bucket/1, untrack_bucket/1]).
 -export([active_gets/0, active_puts/0]).
--export([value/1]).
+-export([value/1, prefix/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -58,7 +62,6 @@
 
 -define(SERVER, ?MODULE).
 -define(APP, riak_kv).
--define(PFX, riak_stat_mngr:prefix()).
 
 start_link() ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
@@ -115,14 +118,14 @@ untrack_bucket(Bucket) when is_binary(Bucket) ->
 
 %% The current number of active get fsms in riak
 active_gets() ->
-  counter_value([?PFX, ?APP, node, gets, fsm, active]).
+  counter_value([prefix(), ?APP, node, gets, fsm, active]).
 
 %% The current number of active put fsms in riak
 active_puts() ->
-  counter_value([?PFX, ?APP, node, puts, fsm, active]).
+  counter_value([prefix(), ?APP, node, puts, fsm, active]).
 
 counter_value(Name) ->
-  case riak_stat_mngr:get_stat(Name, [value]) of
+  case riak_stat_mngr:get_datapoint(Name, [value]) of
     {ok, [{value, N}]} ->
       N;
     _ ->
@@ -186,17 +189,17 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% @doc Update the given stat
 do_update({vnode_get, Idx, USecs}) ->
-  ok = update_stats([vnode, gets], 1),
+  ok = create_or_update([vnode, gets], 1, spiral),
   ok = create_or_update([vnode, gets, time], USecs, histogram),
   do_per_index(gets, Idx, USecs);
 do_update({vnode_put, Idx, USecs}) ->
-  ok = update_stats([vnode, puts], 1),
+  ok = create_or_update([vnode, puts], 1, spiral),
   ok = create_or_update([vnode, puts, time], USecs, histogram),
   do_per_index(puts, Idx, USecs);
 do_update(vnode_index_refresh) ->
-  update_stats([vnode, index, refreshes], 1);
+  create_or_update([vnode, index, refreshes], 1, spiral);
 do_update(vnode_index_read) ->
-  update_stats([vnode, index, reads], 1);
+  create_or_update([vnode, index, reads], 1, spiral);
 do_update({vnode_index_write, PostingsAdded, PostingsRemoved}) ->
   update_stats([
     {[vnode, inedx, writes], 1},
@@ -248,7 +251,8 @@ do_update({get_fsm, Bucket, Microsecs, Stages, NumSiblings, ObjSize, PerBucket, 
   ok = do_stages([node, gets, Type, time], Stages),
   do_get_bucket(PerBucket, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type});
 do_update({put_fsm_time, Bucket, Microsecs, Stages, PerBucket, undefined}) ->
-  update_stats([{[node, puts], 1},
+  update_stats([
+    {[node, puts], 1},
     {[node, puts, time], Microsecs}]),
   ok = do_stages([node, puts, time], Stages),
   do_put_bucket(PerBucket, {Bucket, Microsecs, Stages});
@@ -259,52 +263,55 @@ do_update({put_fsm_time, Bucket, Microsecs, Stages, PerBucket, CRDTMod}) ->
   ok = do_stages([node, puts, Type, time], Stages),
   do_put_bucket(PerBucket, {Bucket, Microsecs, Stages, Type});
 do_update({read_repairs, Indices, Preflist}) ->
-  update_stats([node, gets, read_repairs], 1),
+  create_or_update([node, gets, read_repairs], 1, spiral),
   do_repairs(Indices, Preflist);
 do_update(skipped_read_repairs) ->
-  update_stats([node, gets, skipped_read_repairs], 1);
+  create_or_update([node, gets, skipped_read_repairs], 1, spiral);
 do_update(coord_redir) ->
-  update_stats([node, puts, coord_redirs], 1);
+  create_or_update([node, puts, coord_redirs], 1, counter);
 do_update(mapper_start) ->
-  update_stats([mapper_count], 1);
+  create_or_update([mapper_count], 1, counter);
 do_update(mapper_end) ->
-  update_stats([mapper_count], -1);
+  create_or_update([mapper_count], -1, counter);
 do_update(precommit_fail) ->
-  update_stats([precommit_fail], 1);
+  create_or_update([precommit_fail], 1, counter);
 do_update(postcommit_fail) ->
-  update_stats([postcommit_fail], 1);
+  create_or_update([postcommit_fail], 1, counter);
 do_update(write_once_merge) ->
-  update_stats([write_once_merge], 1);
+  create_or_update([write_once_merge], 1, counter);
 do_update({fsm_spawned, Type}) when Type =:= gets; Type =:= puts ->
-  update_stats([node, Type, fsm, active], 1);
+  create_or_update([node, Type, fsm, active], 1, counter);
 do_update({fsm_exit, Type}) when Type =:= gets; Type =:= puts ->
-  update_stats([node, Type, fsm, active], -1);
+  create_or_update([node, Type, fsm, active], -1, counter);
 do_update({fsm_error, Type}) when Type =:= gets; Type =:= puts ->
   ok = do_update({fsm_exit, Type}),
-  update_stats([node, Type, fsm, errors], 1);
+  create_or_update([node, Type, fsm, errors], 1, spiral);
 do_update({index_create, Pid}) ->
-  update_stats([{[index, fsm, create], 1},
+  update_stats([
+    {[index, fsm, create], 1},
     {[index, fsm, active], 1}]),
   add_monitor(index, Pid),
   ok;
 do_update(index_create_error) ->
-  update_stats([index, fsm, create, error], 1);
+  create_or_update([index, fsm, create, error], 1, spiral);
 do_update({list_create, Pid}) ->
-  update_stats([{[list, fsm, create], 1},
+  update_stats([
+    {[list, fsm, create], 1},
     {[list, fsm, active], 1}]),
   add_monitor(list, Pid),
   ok;
 do_update(list_create_error) ->
-  update_stats([list, fsm, create, error], 1);
+  create_or_update([list, fsm, create, error], 1, spiral);
 do_update({fsm_destroy, Type}) ->
-  update_stats([Type, fsm, active], -1);
+  create_or_update([Type, fsm, active], -1, counter);
 do_update({Type, actor_count, Count}) ->
-  update_stats([Type, actor_count], Count);
+  create_or_update([Type, actor_count], Count, histogram);
 do_update({Type, bytes, Bytes}) ->
-  update_stats([{[Type, bytes], Bytes},
+  update_stats([
+    {[Type, bytes], Bytes},
     {[Type, bytes, total], Bytes}]);
 do_update(late_put_fsm_coordinator_ack) ->
-  update_stats([late_put_fsm_coordinator_ack], 1);
+  create_or_update([late_put_fsm_coordinator_ack], 1, counter);
 do_update({consistent_get, _Bucket, Microsecs, undefined}) ->
   update_stats([
     {[consistent, gets], 1},
@@ -348,17 +355,14 @@ do_per_index(Op, Idx, USecs) ->
 
 unregister_per_index(Op, Idx) ->
   IdxAtom = list_to_atom(integer_to_list(Idx)),
-%%    P = riak_core_stat:prefix(),
   riak_stat_mngr:unregister_stats(Op, IdxAtom, vnode, ?APP),
   riak_stat_mngr:unregister_stats([Op, time], IdxAtom, vnode, ?APP).
-%%  exometer:delete([P, ?APP, vnode, Op, IdxAtom]),
-%%    exometer:delete([P, ?APP, vnode, Op, time, IdxAtom]).
 
 %%  per bucket get_fsm stats
 do_get_bucket(false, _) ->
   ok;
 do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize} = Args) ->
-  case update_stats([node, gets, Bucket], 1) of
+  case create_or_update([node, gets, Bucket], 1, spiral) of
     ok ->
       Stats = [{[node, gets, Dimension, Bucket], Arg}
         || {Dimension, Arg} <- [{time, Microsecs},
@@ -367,13 +371,13 @@ do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize} = Args) ->
       update_stats(Stats),
       do_stages([node, gets, time, Bucket], Stages);
     {error, not_found} ->
-      new([node, gets, Bucket], spiral),
+      register_stats([{[node, gets, Bucket], spiral}]),
       [register_stats({[node, gets, Dimension, Bucket], histogram})
         || Dimension <- [time, siblings, objsize]],
       do_get_bucket(true, Args)
   end;
 do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type} = Args) ->
-  case update_stats([node, gets, Type, Bucket], 1) of
+  case create_or_update([node, gets, Type, Bucket], 1, spiral) of
     ok ->
       Stats = [{[node, gets, Dimension, Bucket], Arg}
         || {Dimension, Arg} <- [{time, Microsecs},
@@ -382,7 +386,7 @@ do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type} = Ar
       update_stats(Stats),
       do_stages([node, gets, Type, time, Bucket], Stages);
     {error, not_found} ->
-      new([node, gets, Type, Bucket], spiral),
+      register_stats([{[node, gets, Type, Bucket], spiral}]),
       [register_stats([{[node, gets, Type, Dimension, Bucket], histogram}])
         || Dimension <- [time, siblings, objsize]],
       do_get_bucket(true, Args)
@@ -392,9 +396,9 @@ do_get_bucket(true, {Bucket, Microsecs, Stages, NumSiblings, ObjSize, Type} = Ar
 do_put_bucket(false, _) ->
   ok;
 do_put_bucket(true, {Bucket, Microsecs, Stages} = Args) ->
-  case update_stats([node, puts, Bucket], 1) of
+  case create_or_update([node, puts, Bucket], 1, spiral) of
     ok ->
-      update_stats([node, puts, time, Bucket], Microsecs),
+      create_or_update([node, puts, time, Bucket], Microsecs, histogram),
       do_stages([node, puts, time, Bucket], Stages);
     {error, _} ->
       register_stats([
@@ -403,9 +407,9 @@ do_put_bucket(true, {Bucket, Microsecs, Stages} = Args) ->
       do_put_bucket(true, Args)
   end;
 do_put_bucket(true, {Bucket, Microsecs, Stages, Type} = Args) ->
-  case update_stats([node, puts, Type, Bucket], 1) of
+  case create_or_update([node, puts, Type, Bucket], 1, Type) of
     ok ->
-      update_stats([node, puts, Type, time, Bucket], Microsecs),
+      create_or_update([node, puts, Type, time, Bucket], Microsecs, Type),
       do_stages([node, puts, Type, time, Bucket], Stages);
     {error, not_found} ->
       register_stats([{[node, puts, Type, Bucket], spiral},
@@ -442,20 +446,17 @@ do_repairs(Indices, Preflist) ->
     Preflist).
 
 update_stats(Stats) ->
-  lists:foreach(fun({Name, Arg}) ->
-    update_stats(Name, Arg)
+  lists:foreach(fun({Name, Arg, Type}) ->
+    create_or_update(Name, Arg, Type)
                 end, Stats).
 
-update_stats(Name, Arg) ->
-  riak_stat_mngr:update_stats(?APP, Name, Arg).
-
-new(Name, Arg) ->
-  riak_stat_mngr:new_register(?APP, Name, Arg).
+%%update_stats(Name, Arg) ->
+%%  riak_stat_mngr:update_stats(?APP, Name, Arg).
 
 %% for dynamically created / dimensioned stats
 %% that can't be registered at start up
 create_or_update(Name, UpdateVal, Type) ->
-  riak_stat_mngr:update(?APP, Name, UpdateVal, Type).
+  riak_stat_mngr:update_or_create(?APP, Name, UpdateVal, Type).
 
 %% @doc list of {Name, Type} for static
 %% stats that we can register at start up
@@ -835,6 +836,9 @@ bc_stats(Pfx) ->
 %% Wrapper for exometer function stats.
 value(V) ->
   V.
+
+prefix() ->
+  riak_stat_mngr:prefix().
 
 %%do_register_stat(Name, Type) ->
 %%    riak_stat_mngr:register_stats(?APP, {Name, Type}).
