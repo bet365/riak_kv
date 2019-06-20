@@ -86,7 +86,6 @@
 	set_legacy_indexes/2,
 	mark_indexes_fixed/2,
 	fixed_index_status/1
-%%	setup_new_backend/3
 ]).
 
 -ifdef(TEST).
@@ -160,8 +159,10 @@ start(Partition, Config) ->
 			{First, Mod, _ModConf} = DefaultBackend = hd(Defs),
 			case Mod of
 				riak_kv_bitcask_backend ->
+					riak_core_metadata:put({split_backend, bitcask}, use_default_backend, true),
 					riak_core_metadata:put({split_backend, bitcask}, default, DefaultBackend);
 				riak_kv_eleveldb_backend ->
+					riak_core_metadata:put({split_backend, leveldb}, use_default_backend, true),
 					riak_core_metadata:put({split_backend, leveldb}, default, DefaultBackend);
 				_ ->
 					%% TODO: Should probably error out here?
@@ -201,7 +202,7 @@ start_additional_backends(Partition, Config, State = #state{backends = CurrentBa
 		lists:foldl(BackendFun, {[], []}, Config),
 	case Errors of
 		[] ->
-			{ok, State#state{backends=[Backends | CurrentBackends]}};
+			{ok, State#state{backends=lists:flatten([Backends | CurrentBackends])}};
 		_ ->
 			{error, Errors}
 	end.
@@ -271,13 +272,18 @@ get(Bucket, Key, State) ->
 	{error, term(), state()}.
 put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, State) ->
 	{Name, Module, SubState} = get_backend(Bucket, State),
-	case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, SubState) of
-		{ok, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{ok, NewState};
-		{error, Reason, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{error, Reason, NewState}
+	case get_backend(Bucket, State) of
+		reject ->
+			{error, "Put rejected due to no backend being configured", State};
+		{Name, Module, SubState} ->
+			case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, SubState) of
+				{ok, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{ok, NewState};
+				{error, Reason, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{error, Reason, NewState}
+			end
 	end.
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
 	{ok, state()} |
@@ -496,11 +502,16 @@ fixed_index_status(Mod, ModState, Status) ->
 %% Given a Bucket name and the State, return the
 %% backend definition. (ie: {Name, Module, SubState})
 %% If no split backend exists, use the default.
-get_backend(Bucket, #state{backends=Backends,
-	default_backend=DefaultBackend}) ->
+get_backend(Bucket, #state{backends=Backends, default_backend=DefaultBackend}) ->
 	%% Ensure that a backend by that name exists...
 	case lists:keyfind(Bucket, 1, Backends) of
-		false -> lists:keyfind(DefaultBackend, 1, Backends);	%% if no backend, return default
+		false ->
+			case riak_core_metadata:get({split_backend, bitcask}, use_default_backend) of
+				true ->
+					lists:keyfind(DefaultBackend, 1, Backends);    %% if no backend, return default
+				_ ->
+					reject
+			end;
 		Backend -> Backend
 	end.
 
@@ -670,6 +681,8 @@ iterate(Itr, Acc) ->
 			NewItr = riak_core_metadata:itr_next(Itr),
 			case Key of
 				default ->
+					iterate(NewItr, Acc);
+				use_default_backend ->
 					iterate(NewItr, Acc);
 				_ ->
 					iterate(NewItr, [Config | Acc])

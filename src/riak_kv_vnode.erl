@@ -409,7 +409,7 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
-update_metadata({{{split_backend, bitcask}, Key}, _MD} = FullKey, Partition) when Key =/= default ->
+update_metadata({{{split_backend, bitcask}, Key}, _MD} = FullKey, Partition) when Key =/= default andalso Key =/= use_default_backend ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {update_metadata, Partition, FullKey, node()},
         riak_kv_vnode_master,
