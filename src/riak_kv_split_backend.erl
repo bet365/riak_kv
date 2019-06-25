@@ -68,6 +68,7 @@
 	capabilities/2,
 	start/2,
 	start_additional_backends/3,
+	check_existing_backend/2,
 	stop/1,
 	get/3,
 	put/5,
@@ -159,10 +160,10 @@ start(Partition, Config) ->
 			{First, Mod, _ModConf} = DefaultBackend = hd(Defs),
 			case Mod of
 				riak_kv_bitcask_backend ->
-					riak_core_metadata:put({split_backend, bitcask}, use_default_backend, true),
+					riak_core_metadata:put({split_backend, bitcask}, use_default_backend, false),
 					riak_core_metadata:put({split_backend, bitcask}, default, DefaultBackend);
 				riak_kv_eleveldb_backend ->
-					riak_core_metadata:put({split_backend, leveldb}, use_default_backend, true),
+					riak_core_metadata:put({split_backend, leveldb}, use_default_backend, false),
 					riak_core_metadata:put({split_backend, leveldb}, default, DefaultBackend);
 				_ ->
 					%% TODO: Should probably error out here?
@@ -242,6 +243,15 @@ start_backend(Name, Module, Partition, Config) ->
 			{Module, Reason1}
 	end.
 
+check_existing_backend(Key, #state{backends = CurrentBackends}) ->
+	case lists:keyfind(Key, 1, CurrentBackends) of
+		false ->
+			false;
+		_ ->
+			true
+	end.
+
+
 %% @doc Stop the backends
 -spec stop(state()) -> ok.
 stop(#state{backends=Backends}) ->
@@ -273,8 +283,8 @@ get(Bucket, Key, State) ->
 put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, State) ->
 	{Name, Module, SubState} = get_backend(Bucket, State),
 	case get_backend(Bucket, State) of
-		reject ->
-			{error, "Put rejected due to no backend being configured", State};
+		{error, _, _} = Error ->
+			Error;
 		{Name, Module, SubState} ->
 			case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, SubState) of
 				{ok, NewSubState} ->
@@ -502,7 +512,7 @@ fixed_index_status(Mod, ModState, Status) ->
 %% Given a Bucket name and the State, return the
 %% backend definition. (ie: {Name, Module, SubState})
 %% If no split backend exists, use the default.
-get_backend(Bucket, #state{backends=Backends, default_backend=DefaultBackend}) ->
+get_backend(Bucket, State = #state{backends=Backends, default_backend=DefaultBackend}) ->
 	%% Ensure that a backend by that name exists...
 	case lists:keyfind(Bucket, 1, Backends) of
 		false ->
@@ -510,7 +520,7 @@ get_backend(Bucket, #state{backends=Backends, default_backend=DefaultBackend}) -
 				true ->
 					lists:keyfind(DefaultBackend, 1, Backends);    %% if no backend, return default
 				_ ->
-					reject
+					throw({error, "Put rejected due to no backend being configured", State})
 			end;
 		Backend -> Backend
 	end.

@@ -626,14 +626,20 @@ add_split_backend([Type, Name]) ->
     end.
 
 put_and_confirm_metadata(Type, Name) ->
-    Config = get_backend_config(Name, Type),
-    riak_core_metadata:put({split_backend, Type}, Name, Config),
     case riak_core_metadata:get({split_backend, Type}, Name) of
         undefined ->
-            io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
-            error;
+            Config = get_backend_config(Name, Type),
+            riak_core_metadata:put({split_backend, Type}, Name, Config),
+            case riak_core_metadata:get({split_backend, Type}, Name) of
+                undefined ->
+                    io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
+                    error;
+                _ ->
+                    io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
+                    ok
+            end;
         _ ->
-            io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
+            io:format("Backend already exists~n"),
             ok
     end.
 

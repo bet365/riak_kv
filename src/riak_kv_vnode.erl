@@ -671,16 +671,22 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
 handle_command({update_metadata, Partition, {{Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
-    Config = riak_core_metadata:get(Prefix, Key),
-    FinalConf = case Config of
-		undefined ->
-			get_backend_config(Key);
-		_ ->
-			Config
-	end,
-    {ok, NewState} = riak_kv_split_backend:start_additional_backends(Partition, FinalConf, ModState),
-    NewState1 = State#state{modstate = NewState},
-    {reply, ok, NewState1};
+    case riak_kv_split_backend:check_existing_backend(atom_to_binary(Key, latin1), ModState) of
+        false ->
+            Config = riak_core_metadata:get(Prefix, Key),
+            FinalConf = case Config of
+                            undefined ->
+                                get_backend_config(Key);
+                            _ ->
+                                Config
+                        end,
+            {ok, NewModState} = riak_kv_split_backend:start_additional_backends(Partition, FinalConf, ModState),
+            NewState = State#state{modstate = NewModState},
+            {reply, ok, NewState};
+        true ->
+            lager:debug("Vnode attempted to start new split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Key}, ModState]),
+            {reply, ok, State}
+    end;
 
 %% entropy exchange commands
 handle_command({hashtree_pid, Node}, _, State=#state{hashtrees=HT}) ->
