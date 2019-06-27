@@ -62,6 +62,8 @@
 
 -define(SERVER, ?MODULE).
 -define(APP, riak_kv).
+-define(PFX, riak_stat_mngr:prefix()).
+
 
 start_link() ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
@@ -70,7 +72,8 @@ register_stats() ->
   register_stats(stats()).
 
 register_stats(Stats) ->
-  riak_stat_mngr:register_stats(?APP, Stats).
+  riak_stat_coordinator:coordinate(admin, {register, {?APP, Stats}}).
+%%  riak_stat_mngr:register_stats(?APP, Stats).
 
 unregister_vnode_stats(Index) ->
   unregister_per_index(gets, Index),
@@ -455,8 +458,10 @@ update_stats(Stats) ->
 
 %% for dynamically created / dimensioned stats
 %% that can't be registered at start up
-create_or_update(Name, UpdateVal, Type) ->
-  riak_stat_mngr:update_or_create(?APP, Name, UpdateVal, Type).
+create_or_update(Name, IncrBy, Type) ->
+  riak_stat_coordinator:coordinate(exometer,
+    {update, {lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type}}).
+%%  riak_stat_mngr:update_or_create(?APP, Name, UpdateVal, Type).
 
 %% @doc list of {Name, Type} for static
 %% stats that we can register at start up
