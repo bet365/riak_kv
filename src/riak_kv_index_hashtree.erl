@@ -976,6 +976,7 @@ do_compare(Id, Remote, AccFun, Acc, From, State) ->
                           "(vnode)=~p (preflist)=~p", [State#state.index, Id]),
             gen_server:reply(From, []);
         {ok, Tree} ->
+            lager:info("[kv_index_hashtree] Comparing trees: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
             spawn_link(fun() ->
                                Remote(init, self()),
                                Result = hashtree:compare2(Tree, Remote,
@@ -1259,7 +1260,7 @@ int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
 
 
 do_update_tree(Id, Callback, From, State) ->
-  lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
+  lager:info("[kv_index_hashtree] Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
   apply_tree(Id,
     fun(Tree) ->
       NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),

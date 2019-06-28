@@ -148,9 +148,9 @@ update_trees(start_exchange, State=#state{local=LocalVN,
                                           local_tree=LocalTree,
                                           remote_tree=RemoteTree,
                                           index_n=IndexN}) ->
-    lager:debug("Sending to ~p", [LocalVN]),
-    lager:debug("Sending to ~p", [RemoteVN]),
 
+    lager:info("[exchange_fsm] Update request; Sending to ~p", [LocalVN]),
+    lager:info("[exchange_fsm] Update request; Sending to ~p", [RemoteVN]),
     update_request(LocalTree, LocalVN, IndexN),
     update_request(RemoteTree, RemoteVN, IndexN),
     {next_state, update_trees, State};
@@ -228,7 +228,12 @@ key_exchange(timeout, State=#state{local=LocalVN,
                                  end, Acc, KeyDiff)
              end,
     %% TODO: Add stats for AAE
+    Seconds = app_helper:get_env(riak_kv, hold_compare_call, 60000),
+    lager:info("[exchange_fsm] Hashtree Compare Call; Holding here for ~p seconds", [Seconds]),
+    timer:sleep(Seconds),
+    lager:info("[exchange_fsm] Hashtree Compare Call; making call now", []),
     Count = riak_kv_index_hashtree:compare(IndexN, Remote, AccFun, 0, LocalTree),
+    lager:info("[exchange_fsm] Hashtree Compare Call; making call complete", []),
     if Count == 0 ->
             Complete = true,
             ok;

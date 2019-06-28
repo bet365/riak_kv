@@ -1230,6 +1230,7 @@ terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) 
     %% process in the riak_kv application, on graceful shutdown riak_kv and
     %% riak_core can complete their shutdown before the hashtree is written
     %% to disk causing the hashtree to be closed dirty.
+    timer:sleep(80000),
     riak_kv_index_hashtree:sync_stop(Trees),
     riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
