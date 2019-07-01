@@ -45,14 +45,14 @@
 -endif.
 
 %% API
--export([start_link/0, get_stats/0, get_values/1,
+-export([start_link/0, get_stats/0, get_values/1, get_app_stats/0,
   update/1, perform_update/1,
   register_stats/0, register_stats/1, unregister_vnode_stats/1,
   produce_stats/0,
   leveldb_read_block_errors/0, stat_update_error/3, stop/0]).
 -export([track_bucket/1, untrack_bucket/1]).
 -export([active_gets/0, active_puts/0]).
--export([value/1, prefix/0]).
+-export([value/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -62,7 +62,7 @@
 
 -define(SERVER, ?MODULE).
 -define(APP, riak_kv).
--define(PFX, riak_stat_mngr:prefix()).
+-define(PFX, riak_stat:prefix()).
 
 
 start_link() ->
@@ -72,7 +72,7 @@ register_stats() ->
   register_stats(stats()).
 
 register_stats(Stats) ->
-  riak_stat_coordinator:coordinate(admin, {register, {?APP, Stats}}).
+  riak_stat:register(?APP, Stats).
 %%  riak_stat_mngr:register_stats(?APP, Stats).
 
 unregister_vnode_stats(Index) ->
@@ -85,8 +85,10 @@ get_stats() ->
   riak_kv_wm_stats:get_stats().
 
 get_values(Path) ->
-  riak_stat_mngr:get_values(Path).
+  riak_stat:get_app_stats(Path).
 
+get_app_stats() ->
+  {?APP, get_values([?APP])}.
 
 %% Creation of a dynamic stat _must_ be serialized.
 %%register_stat(Name, Type) ->
@@ -121,14 +123,14 @@ untrack_bucket(Bucket) when is_binary(Bucket) ->
 
 %% The current number of active get fsms in riak
 active_gets() ->
-  counter_value([prefix(), ?APP, node, gets, fsm, active]).
+  counter_value([?PFX, ?APP, node, gets, fsm, active]).
 
 %% The current number of active put fsms in riak
 active_puts() ->
-  counter_value([prefix(), ?APP, node, puts, fsm, active]).
+  counter_value([?PFX, ?APP, node, puts, fsm, active]).
 
 counter_value(Name) ->
-  case riak_stat_mngr:get_datapoint(Name, [value]) of
+  case riak_stat_exometer:info(Name, [value]) of
     {ok, [{value, N}]} ->
       N;
     _ ->
@@ -338,6 +340,7 @@ do_update({write_once_put, Microsecs, ObjSize}) ->
 
 %% private
 
+
 add_monitor(Type, Pid) ->
   gen_server:cast(?SERVER, {monitor, Type, Pid}).
 
@@ -358,8 +361,10 @@ do_per_index(Op, Idx, USecs) ->
 
 unregister_per_index(Op, Idx) ->
   IdxAtom = list_to_atom(integer_to_list(Idx)),
-  riak_stat_mngr:unregister_stats(Op, IdxAtom, vnode, ?APP),
-  riak_stat_mngr:unregister_stats([Op, time], IdxAtom, vnode, ?APP).
+  riak_stat:unregister(?APP, Op, IdxAtom, vnode),
+  riak_stat:unregister([Op, time], IdxAtom, vnode, ?APP).
+%%  riak_stat_mngr:unregister_stats(Op, IdxAtom, vnode, ?APP),
+%%  riak_stat_mngr:unregister_stats([Op, time], IdxAtom, vnode, ?APP).
 
 %%  per bucket get_fsm stats
 do_get_bucket(false, _) ->
@@ -453,20 +458,14 @@ update_stats(Stats) ->
     create_or_update(Name, Arg, Type)
                 end, Stats).
 
-%%update_stats(Name, Arg) ->
-%%  riak_stat_mngr:update_stats(?APP, Name, Arg).
-
 %% for dynamically created / dimensioned stats
 %% that can't be registered at start up
 create_or_update(Name, IncrBy, Type) ->
-  riak_stat_coordinator:coordinate(exometer,
-    {update, {lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type}}).
-%%  riak_stat_mngr:update_or_create(?APP, Name, UpdateVal, Type).
+  riak_stat:update(lists:flatten([?PFX, ?APP | [Name]]), IncrBy, Type).
 
 %% @doc list of {Name, Type} for static
 %% stats that we can register at start up
 stats() ->
-  Pfx = riak_stat_mngr:prefix(),
 
   [%% vnode stats
     {[vnode, gets], spiral, [], [{one, vnode_gets},
@@ -793,12 +792,12 @@ stats() ->
       [], [{ring_members, ring_members},
       {ring_num_partitions, ring_num_partitions},
       {ring_ownership, ring_ownership}]}
-    | read_repair_aggr_stats(Pfx)] ++ bc_stats(Pfx).
+    | read_repair_aggr_stats()] ++ bc_stats().
 
-read_repair_aggr_stats(Pfx) ->
+read_repair_aggr_stats() ->
   Spec = fun(Type, Reason) ->
     {function, exometer, aggregate,
-      [[{{[Pfx, ?APP, node, gets, read_repairs, '_', Type, Reason], '_', '_'},
+      [[{{[?PFX, ?APP, node, gets, read_repairs, '_', Type, Reason], '_', '_'},
         [], [true]}], [one, count]], proplist, [one, count]}
          end,
   [
@@ -816,11 +815,11 @@ read_repair_aggr_stats(Pfx) ->
         {count, read_repairs_fallback_outofdate_count}]}
   ].
 
-bc_stats(Pfx) ->
+bc_stats() ->
   Spec = fun(N, M, F, As) ->
-    {[Pfx, ?APP, bc, N], {function, M, F, As, match, value}, [], [{value, N}]}
+    {[?PFX, ?APP, bc, N], {function, M, F, As, match, value}, [], [{value, N}]}
          end,
-  [Spec(N, M, F, As) || %stat possibly
+  [Spec(N, M, F, As) ||
     {N, M, F, As} <- [{nodename, erlang, node, []},
       {connected_nodes, erlang, nodes, []},
       {sys_driver_version, riak_kv_stat_bc, sys_driver_version, []},
@@ -841,9 +840,6 @@ bc_stats(Pfx) ->
 %% Wrapper for exometer function stats.
 value(V) ->
   V.
-
-prefix() ->
-  riak_stat_mngr:prefix().
 
 %%do_register_stat(Name, Type) ->
 %%    riak_stat_mngr:register_stats(?APP, {Name, Type}).
@@ -949,14 +945,14 @@ stat_repair_loop(Dad) ->
 leveldb_rbe_test_() ->
   {foreach,
     fun() ->
-      riak_stat_mngr:start(),
+      riak_stat_exometer:start(),
       meck:new(riak_core_ring_manager),
       meck:new(riak_core_ring),
       meck:new(riak_kv_vnode),
       meck:expect(riak_core_ring_manager, get_my_ring, fun() -> {ok, [fake_ring]} end)
     end,
     fun(_) ->
-      riak_stat_mngr:stop(),
+      riak_stat_exometer:stop(),
       meck:unload(riak_kv_vnode),
       meck:unload(riak_core_ring),
       meck:unload(riak_core_ring_manager)
@@ -969,7 +965,7 @@ leveldb_rbe_test_() ->
   }.
 
 start_exometer_test_env() ->
-  ok = riak_stat_mngr:start(),
+  ok = riak_stat_exometer:start(),
   ok = meck:new(riak_core_ring_manager),
   ok = meck:new(riak_core_ring),
   ok = meck:new(riak_kv_vnode),
@@ -977,7 +973,7 @@ start_exometer_test_env() ->
   meck:expect(riak_core_ring_manager, get_my_ring, fun() -> {ok, [fake_ring]} end).
 
 stop_exometer_test_env() ->
-  ok = riak_stat_mngr:stop(),
+  ok = riak_stat_exometer:stop(),
   ok = meck:unload(riak_kv_vnode),
   ok = meck:unload(riak_core_ring),
   meck:unload(riak_core_ring_manager).
@@ -987,7 +983,7 @@ create_or_update_histogram_test() ->
   try
     Metric = [riak_kv, put_fsm, counter, time],
     ok = repeat_create_or_update(Metric, 1, histogram, 100),
-    ?assertNotEqual(riak_stat_mngr:get_value(Metric), 0),
+    ?assertNotEqual(do(exometer, get_value, Metric), 0),
     Stats = get_stats(),
     %%lager:info("stats prop list ~s", [Stats]),
     ?assertNotEqual(proplists:get_value({node_put_fsm_counter_time_mean}, Stats), 0)
