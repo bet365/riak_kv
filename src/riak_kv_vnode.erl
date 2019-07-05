@@ -2900,12 +2900,14 @@ list_buckets_test_() ->
              exometer:start(),
              riak_kv_stat:register_stats(),
              {ok, _} = riak_core_bg_manager:start(),
+             riak_core_metadata_events:start_link(),
              riak_core_metadata_manager:start_link([{data_dir, "kv_vnode_test_meta"}]),
              Env
      end,
      fun(Env) ->
              riak_core_ring_manager:cleanup_ets(test),
              riak_kv_test_util:stop_process(riak_core_metadata_manager),
+             riak_kv_test_util:stop_process(riak_core_metadata_events),
              riak_kv_test_util:stop_process(riak_core_bg_manager),
              exometer:stop(),
              application:stop(sasl),
@@ -2958,6 +2960,7 @@ list_buckets_test_i(BackendMod) ->
 filter_keys_test() ->
     riak_core_ring_manager:setup_ets(test),
     clean_test_dirs(),
+    riak_core_metadata_events:start_link(),
     riak_core_metadata_manager:start_link([{data_dir, "kv_vnode_test_meta"}]),
     riak_core_bg_manager:start(),
     {S, B, K} = backend_with_known_key(riak_kv_memory_backend),
@@ -2981,6 +2984,7 @@ filter_keys_test() ->
 
     riak_core_ring_manager:cleanup_ets(test),
     riak_kv_test_util:stop_process(riak_core_metadata_manager),
+    riak_kv_test_util:stop_process(riak_core_metadata_events),
     riak_kv_test_util:stop_process(riak_core_bg_manager),
     flush_msgs().
 
@@ -2991,6 +2995,7 @@ filter_keys_test() ->
 %% preparation for a write prevents the write from going through.
 bitcask_badcrc_test() ->
     riak_core_ring_manager:setup_ets(test),
+    riak_core_metadata_events:start_link(),
     riak_core_metadata_manager:start_link([{data_dir, "kv_vnode_test_meta"}]),
     riak_core_bg_manager:start(),
     clean_test_dirs(),
@@ -3010,6 +3015,7 @@ bitcask_badcrc_test() ->
                                    S),
     riak_core_ring_manager:cleanup_ets(test),
     riak_kv_test_util:stop_process(riak_core_metadata_manager),
+    riak_kv_test_util:stop_process(riak_core_metadata_events),
     riak_kv_test_util:stop_process(riak_core_bg_manager),
     flush_msgs().
 
