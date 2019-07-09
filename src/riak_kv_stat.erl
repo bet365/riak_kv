@@ -46,6 +46,7 @@
 
 %% API
 -export([start_link/0, get_stats/0, get_values/1, get_app_stats/0,
+  get_stats_status/0, get_stats_info/0,
   update/1, perform_update/1,
   register_stats/0, register_stats/1, unregister_vnode_stats/1,
   produce_stats/0,
@@ -88,7 +89,15 @@ get_values(Path) ->
   riak_stat:get_app_stats(Path).
 
 get_app_stats() ->
-  {?APP, get_values([?APP])}.
+  riak_stat:get_app_stats(?APP).
+
+get_stats_status() ->
+  riak_stat:get_stats_status(?APP).
+
+get_stats_info() ->
+  riak_stat:get_stats_info(?APP).
+
+
 
 %% Creation of a dynamic stat _must_ be serialized.
 %%register_stat(Name, Type) ->
@@ -130,11 +139,13 @@ active_puts() ->
   counter_value([?PFX, ?APP, node, puts, fsm, active]).
 
 counter_value(Name) ->
-  case riak_stat_exometer:info(Name, [value]) of
-    {ok, [{value, N}]} ->
-      N;
-    _ ->
-      0
+  case riak_stat_coordinator:get_info(Name, value) of
+%%    {ok, [{value, N}]} ->
+%%      N;
+    [] ->
+      0;
+    N ->
+      N
   end.
 
 stop() ->

@@ -242,7 +242,7 @@ level_stats() ->
 %% The CSEs are only interested in aggregations of Type and Reason
 %% which are elements 6 and 7 in the key.
 read_repair_stats() ->
-    Pfx = riak_stat_mngr:prefix(),
+    Pfx = riak_stat:prefix(),
     aggregate(read_repairs, [Pfx, riak_kv, node, gets, read_repairs, '_', '_', '_'], [7,8]).
 
 %% TODO generalise for riak_core_stat_q
