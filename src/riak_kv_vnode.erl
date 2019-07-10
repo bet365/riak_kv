@@ -409,7 +409,7 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
-update_metadata({{{split_backend, bitcask}, Key}, _MD} = FullKey, Partition) when Key =/= default andalso Key =/= use_default_backend ->
+update_metadata({{{split_backend, _BackendType}, Key}, _MD} = FullKey, Partition) when Key =/= default andalso Key =/= use_default_backend ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {update_metadata, Partition, FullKey, node()},
         riak_kv_vnode_master,
@@ -670,13 +670,13 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
                   end,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
-handle_command({update_metadata, Partition, {{Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
+handle_command({update_metadata, Partition, {{{split_backend, Type} = Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
     case riak_kv_split_backend:check_existing_backend(atom_to_binary(Key, latin1), ModState) of
         false ->
             Config = riak_core_metadata:get(Prefix, Key),
             FinalConf = case Config of
                             undefined ->
-                                get_backend_config(Key);
+                                get_backend_config(Type, Key);
                             _ ->
                                 Config
                         end,
@@ -998,8 +998,8 @@ handle_coverage(?KV_INDEX_REQ{bucket=Bucket,
     handle_coverage_index(Bucket, ItemFilter, Query,
                           FilterVNodes, Sender, State, fun result_fun_ack/2).
 
-get_backend_config(Name) ->
-    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, bitcask}, default),
+get_backend_config(Type, Name) ->
+    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
     {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
     DataRoot = re:replace(S, binary_to_list(DefName), atom_to_list(Name), [{return, list}]),
     NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
@@ -2863,7 +2863,11 @@ dummy_backend(BackendMod) ->
     application:set_env(riak_kv, multi_backend_default, multi_dummy_memory1),
     application:set_env(riak_kv, multi_backend,
                         [{multi_dummy_memory1, riak_kv_memory_backend, []},
-                         {multi_dummy_memory2, riak_kv_memory_backend, []}]).
+                         {multi_dummy_memory2, riak_kv_memory_backend, []}]),
+    application:set_env(riak_kv, split_backend_default, split_dummy_memory1),
+    application:set_env(riak_kv, split_backend,
+        [{split_dummy_memory1, riak_kv_memory_backend, []},
+            {split_dummy_memory2, riak_kv_memory_backend, []}]).
 
 bitcask_test_dir() ->
     "./test.bitcask-temp-data".
@@ -2902,12 +2906,14 @@ list_buckets_test_() ->
              {ok, _} = riak_core_bg_manager:start(),
              riak_core_metadata_events:start_link(),
              riak_core_metadata_manager:start_link([{data_dir, "kv_vnode_test_meta"}]),
+             riak_core_metadata_hashtree:start_link(),
              Env
      end,
      fun(Env) ->
              riak_core_ring_manager:cleanup_ets(test),
              riak_kv_test_util:stop_process(riak_core_metadata_manager),
              riak_kv_test_util:stop_process(riak_core_metadata_events),
+             riak_kv_test_util:stop_process(riak_core_metadata_hashtree),
              riak_kv_test_util:stop_process(riak_core_bg_manager),
              exometer:stop(),
              application:stop(sasl),
@@ -2945,7 +2951,13 @@ list_buckets_test_() ->
                        ok
                end
               }
-      end
+      end,
+         {"split list buckets",
+             fun() ->
+                 list_buckets_test_i(riak_kv_split_backend),
+                 ok
+             end
+         }
      ]
     }.
 

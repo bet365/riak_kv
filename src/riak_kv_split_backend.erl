@@ -161,13 +161,10 @@ start(Partition, Config) ->
 			riak_core_metadata:put({split_backend, all}, use_default_backend, true),
 			case Mod of
 				riak_kv_bitcask_backend ->
-%%					riak_core_metadata:put({split_backend, bitcask}, use_default_backend, false),
 					riak_core_metadata:put({split_backend, bitcask}, default, DefaultBackend);
 				riak_kv_eleveldb_backend ->
-%%					riak_core_metadata:put({split_backend, leveldb}, use_default_backend, false),
 					riak_core_metadata:put({split_backend, leveldb}, default, DefaultBackend);
 				riak_kv_memory_backend ->
-%%					riak_core_metadata:put({split_backend, memory}, use_default_backend, false),
 					riak_core_metadata:put({split_backend, memory}, default, DefaultBackend);
 				_ ->
 					%% TODO: Should probably error out here?
@@ -685,8 +682,12 @@ backend_can_index_reformat(Mod, ModState) ->
 
 fetch_metadata_backends() ->
 	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
-	Backends = iterate(Itr, []),
-	lists:flatten([X || X <- Backends, X =/= ['$deleted']]).
+	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
+	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
+	Itrs = [Itr2, Itr1, Itr],
+	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc) end, [], Itrs),
+%%	Backends = iterate(Itr, []),
+	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
 
 iterate(Itr, Acc) ->
 	case riak_core_metadata:itr_done(Itr) of
@@ -718,9 +719,7 @@ split_backend_test_() ->
 			%% start the ring manager
 			{ok, P1} = riak_core_ring_events:start_link(),
 			{ok, P2} = riak_core_ring_manager:start_link(test),
-			riak_core_metadata_events:start_link(),
-			riak_core_metadata_hashtree:start_link(),
-			riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+			startup_metadata_apps(),
 			application:load(riak_core),
 			application:set_env(riak_core, default_bucket_props, []),
 
@@ -736,9 +735,7 @@ split_backend_test_() ->
 			?assertCmd("rm -rf test/bitcask-backend"),
 			unlink(P1),
 			unlink(P2),
-			riak_kv_test_util:stop_process(riak_core_metadata_manager),
-			riak_kv_test_util:stop_process(riak_core_metadata_events),
-			riak_kv_test_util:stop_process(riak_core_metadata_hashtree),
+			stop_metadata_apps(),
 			catch exit(P1, kill),
 			catch exit(P2, kill),
 			wait_until_dead(P1),
@@ -755,6 +752,38 @@ split_backend_test_() ->
 				}
 			end,
 			fun(_) ->
+				{"check_existing_backend_test",
+					fun() ->
+						{ok, State} = start(42, sample_config()),
+
+						true = check_existing_backend(first_backend, State),
+						true = check_existing_backend(second_backend, State),
+
+						false = check_existing_backend(should_not_exist, State)
+					end
+				}
+			end,
+			fun(_) ->
+				{"start_additional_backends_test",
+					fun() ->
+						{ok, State} = start(42, sample_config()),
+
+						true = check_existing_backend(first_backend, State),
+						true = check_existing_backend(second_backend, State),
+
+						false = check_existing_backend(new_backend, State),
+
+						NewConf = [{new_backend, riak_kv_bitcask_backend, []}, {new_backend2, riak_kv_eleveldb_backend, []}],
+
+						{ok, NewState} = start_additional_backends(42, NewConf, State),
+
+						true = check_existing_backend(new_backend, NewState),
+						true = check_existing_backend(new_backend2, NewState)
+
+					end
+				}
+			end,
+			fun(_) ->
 				{"get_backend_test",
 					fun() ->
 						%% Start the backend...
@@ -765,7 +794,11 @@ split_backend_test_() ->
 
 						%% Check the default...
 						{second_backend, riak_kv_memory_backend, _} = get_backend(<<"b3">>, State),
-						ok
+
+						riak_core_metadata:put({split_backend, all}, use_default_backend, false),
+
+						%% Check that error is thrown when flag set to not use default
+						?assertThrow({error, "Put rejected due to no backend being configured", State}, get_backend(<<"b3">>, State))
 					end
 				}
 			end,
@@ -812,9 +845,7 @@ split_backend_test_() ->
 
 						FoldFun = fun(_Bucket, Key, Acc) -> [Key | Acc] end,
 
-						{ok, FoldRes} = fold_keys(FoldFun, [], [], State),
-
-						ok
+						{ok, _FoldRes} = fold_keys(FoldFun, [], [], State)
 					end
 				}
 			end,
@@ -894,9 +925,7 @@ extra_callback_test() ->
 	?assertCmd("rm -rf test/eleveldb-backend"),
 	application:set_env(eleveldb, data_root, "test/eleveldb-backend"),
 
-	riak_core_metadata_events:start_link(),
-	riak_core_metadata_hashtree:start_link(),
-	riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+	startup_metadata_apps(),
 
 
 	%% Start up multi backend
@@ -909,9 +938,7 @@ extra_callback_test() ->
 	{ok, State} = start(0, Config),
 	callback(make_ref(), ignore_me, State),
 	stop(State),
-	riak_kv_test_util:stop_process(riak_core_metadata_manager),
-	riak_kv_test_util:stop_process(riak_core_metadata_events),
-	riak_kv_test_util:stop_process(riak_core_metadata_hashtree),
+	stop_metadata_apps(),
 	application:stop(bitcask).
 
 bad_config_test() ->
@@ -958,5 +985,15 @@ wait_until_dead(Pid) when is_pid(Pid) ->
 	end;
 wait_until_dead(_) ->
 	ok.
+
+startup_metadata_apps() ->
+	riak_core_metadata_events:start_link(),
+	riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+	riak_core_metadata_hashtree:start_link().
+
+stop_metadata_apps() ->
+	riak_kv_test_util:stop_process(riak_core_metadata_events),
+	riak_kv_test_util:stop_process(riak_core_metadata_manager),
+	riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
 
 -endif.

@@ -55,6 +55,8 @@
          aae_repair_status/1,
          aae_tree_status/1]).
 
+-define(ACCEPTED_BACKENDS, [bitcask, leveldb]).
+
 join([NodeStr]) ->
     join(NodeStr, fun riak_core:join/1,
          "Sent join request to ~s~n", [NodeStr]).
@@ -614,13 +616,10 @@ bucket_type_is_first(It, false) ->
 add_split_backend([Type, Name]) when is_list(Type) andalso is_list(Name) ->
     add_split_backend([list_to_atom(Type), list_to_atom(Name)]);
 add_split_backend([Type, Name]) ->
-    lager:info("Reached riak_kv_console, type: ~p, Name: ~p~n", [Type, Name]),
-    case Type of
-        bitcask ->
+    case lists:member(Type, ?ACCEPTED_BACKENDS) of
+        true ->
             put_and_confirm_metadata(Type, Name);
-        leveldb ->
-            put_and_confirm_metadata(Type, Name);
-        _ ->
+        false ->
             io:format("Backend type: ~p is not a valid type. Supported types are bitcask and leveldb", [Type]),
             error
     end.
