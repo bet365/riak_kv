@@ -1001,7 +1001,7 @@ handle_coverage(?KV_INDEX_REQ{bucket=Bucket,
 get_backend_config(Type, Name) ->
     {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
     {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
-    DataRoot = re:replace(S, binary_to_list(DefName), atom_to_list(Name), [{return, list}]),
+    DataRoot = re:replace(S, atom_to_list(DefName), atom_to_list(Name), [{return, list}]),
     NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
     {atom_to_binary(Name, latin1), Mod, NewModConf}.
 

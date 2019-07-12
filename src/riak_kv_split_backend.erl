@@ -157,23 +157,37 @@ start(Partition, Config) ->
 				split_backend,
 				list_is_empty}};
 		true ->
-			{First, Mod, _ModConf} = DefaultBackend = hd(Defs),
-			riak_core_metadata:put({split_backend, all}, use_default_backend, true),
-			case Mod of
-				riak_kv_bitcask_backend ->
-					riak_core_metadata:put({split_backend, bitcask}, default, DefaultBackend);
-				riak_kv_eleveldb_backend ->
-					riak_core_metadata:put({split_backend, leveldb}, default, DefaultBackend);
-				riak_kv_memory_backend ->
-					riak_core_metadata:put({split_backend, memory}, default, DefaultBackend);
-				_ ->
-					%% TODO: Should probably error out here?
-					riak_core_metadata:put({split_backend, Mod}, default, DefaultBackend)
-			end,
 			%% Get the default
+			{First, _Mod, _ModConf} = hd(Defs),
 			DefaultName = app_helper:get_prop_or_env(split_backend_default, Config, riak_kv, First),
+
+			riak_core_metadata:put({split_backend, all}, use_default_backend, true),
+
 			case lists:keymember(DefaultName, 1, Defs) of
 				true ->
+%%					NewDefaultConfig = {default_split, Mod, ModConf},
+
+					BitcaskConf = app_helper:get_env(bitcask),
+					LevelDBConf = app_helper:get_env(eleveldb),
+					MemoryConf = app_helper:get_env(memory),
+
+					riak_core_metadata:put({split_backend, bitcask}, default, {default_split, riak_kv_bitcask_backend, BitcaskConf}),
+					riak_core_metadata:put({split_backend, leveldb}, default, {default_split, riak_kv_eleveldb_backend, LevelDBConf}),
+					riak_core_metadata:put({split_backend, memory}, default, {default_split, riak_kv_memory_backend, MemoryConf}),
+
+%%					case Mod of
+%%						riak_kv_bitcask_backend ->
+%%							riak_core_metadata:put({split_backend, bitcask}, default, NewDefaultConfig);
+%%						riak_kv_eleveldb_backend ->
+%%							riak_core_metadata:put({split_backend, leveldb}, default, NewDefaultConfig);
+%%						riak_kv_memory_backend ->
+%%							riak_core_metadata:put({split_backend, memory}, default, NewDefaultConfig);
+%%						_ ->
+%%							%% TODO: Should probably error out here?
+%%							riak_core_metadata:put({split_backend, Mod}, default, DefaultBackend)
+%%					end,
+
+
 					OtherBackends = fetch_metadata_backends(),
 					Final = lists:flatten([OtherBackends | Defs]),
 					%% Start the backends
@@ -513,8 +527,6 @@ fixed_index_status(Mod, ModState, Status) ->
 %% Given a Bucket name and the State, return the
 %% backend definition. (ie: {Name, Module, SubState})
 %% If no split backend exists, use the default.
-get_backend(Bucket, State = #state{backends=Backends, default_backend=DefaultBackend}) when is_binary(Bucket) ->
-	get_backend(binary_to_atom(Bucket, latin1), State = #state{backends=Backends, default_backend=DefaultBackend});
 get_backend(Bucket, State = #state{backends=Backends, default_backend=DefaultBackend}) ->
 	%% Ensure that a backend by that name exists...
 	case lists:keyfind(Bucket, 1, Backends) of
@@ -686,7 +698,6 @@ fetch_metadata_backends() ->
 	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
 	Itrs = [Itr2, Itr1, Itr],
 	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc) end, [], Itrs),
-%%	Backends = iterate(Itr, []),
 	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
 
 iterate(Itr, Acc) ->
@@ -754,10 +765,13 @@ split_backend_test_() ->
 			fun(_) ->
 				{"check_existing_backend_test",
 					fun() ->
-						{ok, State} = start(42, sample_config()),
+						B1 = <<"b1">>,
+						B2 = <<"b2">>,
+						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
+						{ok, State} = start(42, Config),
 
-						true = check_existing_backend(first_backend, State),
-						true = check_existing_backend(second_backend, State),
+						true = check_existing_backend(B1, State),
+						true = check_existing_backend(B2, State),
 
 						false = check_existing_backend(should_not_exist, State)
 					end
@@ -766,10 +780,13 @@ split_backend_test_() ->
 			fun(_) ->
 				{"start_additional_backends_test",
 					fun() ->
-						{ok, State} = start(42, sample_config()),
+						B1 = <<"b1">>,
+						B2 = <<"b2">>,
+						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
+						{ok, State} = start(42, Config),
 
-						true = check_existing_backend(first_backend, State),
-						true = check_existing_backend(second_backend, State),
+						true = check_existing_backend(B1, State),
+						true = check_existing_backend(B2, State),
 
 						false = check_existing_backend(new_backend, State),
 
@@ -779,7 +796,6 @@ split_backend_test_() ->
 
 						true = check_existing_backend(new_backend, NewState),
 						true = check_existing_backend(new_backend2, NewState)
-
 					end
 				}
 			end,
@@ -787,13 +803,16 @@ split_backend_test_() ->
 				{"get_backend_test",
 					fun() ->
 						%% Start the backend...
-						{ok, State} = start(42, sample_config()),
+						B1 = <<"b1">>,
+						B2 = <<"b2">>,
+						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
+						{ok, State} = start(42, Config),
 						%% Check our buckets...
-						{first_backend, riak_kv_memory_backend, _} = get_backend(<<"first_backend">>, State),
-						{second_backend, riak_kv_memory_backend, _} = get_backend(<<"second_backend">>, State),
+						{B1, riak_kv_bitcask_backend, _} = get_backend(B1, State),
+						{B2, riak_kv_bitcask_backend, _} = get_backend(B2, State),
 
 						%% Check the default...
-						{second_backend, riak_kv_memory_backend, _} = get_backend(<<"b3">>, State),
+						{B1, riak_kv_bitcask_backend, _} = get_backend(<<"b3">>, State),
 
 						riak_core_metadata:put({split_backend, all}, use_default_backend, false),
 
@@ -808,9 +827,10 @@ split_backend_test_() ->
 						B1 = <<"first_backend">>, B2 = <<"second_backend">>,
 						K1 = <<"k1">>, K2 = <<"k2">>,
 						V1 = <<"v1">>, V2 = <<"v2">>,
+						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
 
 						%% Start the backend...
-						{ok, State} = start(42, sample_config()),
+						{ok, State} = start(40, Config),
 
 						%% Create some placeholder values in the buckets so that they show
 						%% up when we run the fold operation...
@@ -825,7 +845,7 @@ split_backend_test_() ->
 
 						%% Then filter on a specific backend, and we should only see
 						%% the bucket using that backend:
-						{ok, [B2]} = fold_buckets(FoldFun, [], [{backend, [second_backend]}], State)
+						{ok, [B2]} = fold_buckets(FoldFun, [], [{backend, [B2]}], State)
 					end
 				}
 			end,
@@ -957,7 +977,7 @@ sample_config() ->
 	].
 
 sample_split_bucket_config(Buckets, Type) ->
-	Backends = [{Bucket, Type, []} || Bucket <- Buckets],
+	Backends = [{Bucket, Type, [{data_root, "test/bitcask-backend/" ++ binary_to_list(Bucket)}]} || Bucket <- Buckets],
 	[
 		{storage_backend, riak_kv_split_backend},
 		{split_backend_default, hd(Buckets)},
