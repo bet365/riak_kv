@@ -409,13 +409,11 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
-update_metadata({{{split_backend, _BackendType}, Key}, _MD} = FullKey, Partition) when Key =/= default andalso Key =/= use_default_backend ->
+update_metadata({{{split_backend, _BackendType}, _Key}, _MD} = FullKey, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {update_metadata, Partition, FullKey, node()},
         riak_kv_vnode_master,
-        infinity);
-update_metadata(_, _) ->
-    ok.
+        infinity).
 
 -spec hashtree_pid(index()) -> {ok, pid()} | {error, wrong_node}.
 hashtree_pid(Partition) ->
@@ -671,7 +669,7 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
 handle_command({update_metadata, Partition, {{{split_backend, Type} = Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
-    case riak_kv_split_backend:check_existing_backend(atom_to_binary(Key, latin1), ModState) of
+    case riak_kv_split_backend:check_backend_exists(atom_to_binary(Key, latin1), ModState) of
         false ->
             Config = riak_core_metadata:get(Prefix, Key),
             FinalConf = case Config of

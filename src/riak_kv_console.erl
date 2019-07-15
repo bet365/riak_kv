@@ -878,9 +878,9 @@ bucket_error_xlate(X) ->
     io_lib:format("~p", [X]).
 
 get_backend_config(Name, Type) ->
-    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
+    {_DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
     {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
-    DataRoot = re:replace(S, atom_to_list(DefName), atom_to_list(Name), [{return, list}]),
+    NewDataRoot = atom_to_list(Type) ++ "/" ++ atom_to_list(Name),
+    DataRoot = re:replace(S, atom_to_list(Type), NewDataRoot, [{return, list}]),
     NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
-    io:format("NewModConfig: ~p~n", [NewModConf]), %% TODO data_root isnt being replaced correctly???
     {atom_to_binary(Name, latin1), Mod, NewModConf}.

@@ -68,7 +68,7 @@
 	capabilities/2,
 	start/2,
 	start_additional_backends/3,
-	check_existing_backend/2,
+	check_backend_exists/2,
 	stop/1,
 	get/3,
 	put/5,
@@ -161,34 +161,9 @@ start(Partition, Config) ->
 			{First, _Mod, _ModConf} = hd(Defs),
 			DefaultName = app_helper:get_prop_or_env(split_backend_default, Config, riak_kv, First),
 
-			riak_core_metadata:put({split_backend, all}, use_default_backend, true),
-
 			case lists:keymember(DefaultName, 1, Defs) of
 				true ->
-%%					NewDefaultConfig = {default_split, Mod, ModConf},
-
-					BitcaskConf = app_helper:get_env(bitcask),
-					LevelDBConf = app_helper:get_env(eleveldb),
-					MemoryConf = app_helper:get_env(memory),
-
-					riak_core_metadata:put({split_backend, bitcask}, default, {default_split, riak_kv_bitcask_backend, BitcaskConf}),
-					riak_core_metadata:put({split_backend, leveldb}, default, {default_split, riak_kv_eleveldb_backend, LevelDBConf}),
-					riak_core_metadata:put({split_backend, memory}, default, {default_split, riak_kv_memory_backend, MemoryConf}),
-
-%%					case Mod of
-%%						riak_kv_bitcask_backend ->
-%%							riak_core_metadata:put({split_backend, bitcask}, default, NewDefaultConfig);
-%%						riak_kv_eleveldb_backend ->
-%%							riak_core_metadata:put({split_backend, leveldb}, default, NewDefaultConfig);
-%%						riak_kv_memory_backend ->
-%%							riak_core_metadata:put({split_backend, memory}, default, NewDefaultConfig);
-%%						_ ->
-%%							%% TODO: Should probably error out here?
-%%							riak_core_metadata:put({split_backend, Mod}, default, DefaultBackend)
-%%					end,
-
-
-					OtherBackends = fetch_metadata_backends(),
+					OtherBackends = fetch_metadata_backends(Defs),
 					Final = lists:flatten([OtherBackends | Defs]),
 					%% Start the backends
 					BackendFun = start_backend_fun(Partition),
@@ -196,6 +171,7 @@ start(Partition, Config) ->
 						lists:foldl(BackendFun, {[], []}, Final),
 					case Errors of
 						[] ->
+							metadata_config_puts(Defs),
 							{ok, #state{backends=Backends,
 								default_backend= DefaultName}};
 						_ ->
@@ -258,7 +234,8 @@ start_backend(Name, Module, Partition, Config) ->
 			{Module, Reason1}
 	end.
 
-check_existing_backend(Key, #state{backends = CurrentBackends}) ->
+check_backend_exists(Key, #state{backends = CurrentBackends}) ->
+	lager:info("Current Backends: ~p~n", [CurrentBackends]),
 	case lists:keyfind(Key, 1, CurrentBackends) of
 		false ->
 			false;
@@ -692,28 +669,47 @@ backend_can_index_reformat(Mod, ModState) ->
 	{ok, Caps} = Mod:capabilities(ModState),
 	lists:member(index_reformat, Caps).
 
-fetch_metadata_backends() ->
+metadata_config_puts(_Defs) ->
+	BitcaskConf = app_helper:get_env(bitcask),
+	LevelDBConf = app_helper:get_env(eleveldb),
+	MemoryConf  = app_helper:get_env(memory),
+
+	riak_core_metadata:put({split_backend, all}, use_default_backend, true),
+	riak_core_metadata:put({split_backend, bitcask}, default, {default_split, riak_kv_bitcask_backend, BitcaskConf}),
+	riak_core_metadata:put({split_backend, leveldb}, default, {default_split, riak_kv_eleveldb_backend, LevelDBConf}),
+	riak_core_metadata:put({split_backend, memory}, default, {default_split, riak_kv_memory_backend, MemoryConf}).
+%% TODO: Initial start up config needs adding to metadata, but doing it atr this stage triggers a race condition due to riak_kv_vnode not having finished starting up.
+%% TODO: Need to figure out how to push to the metadata without propogating to the vnode event.
+%%	lists:foreach(fun
+%%					  ({Name, riak_kv_bitcask_backend, ModConf}) ->
+%%						  riak_core_metadata:put({split_backend, bitcask}, binary_to_atom(Name, latin1), {Name, riak_kv_bitcask_backend, ModConf});
+%%					  ({Name, riak_kv_eleveldb_backend, ModConf}) ->
+%%						  riak_core_metadata:put({split_backend, leveldb}, binary_to_atom(Name, latin1), {Name, riak_kv_eleveldb_backend, ModConf});
+%%					  ({Name, riak_kv_memory_backend, ModConf}) ->
+%%						  riak_core_metadata:put({split_backend, memory}, binary_to_atom(Name, latin1), {Name, riak_kv_memory_backend, ModConf})
+%%				  end, Defs).
+
+fetch_metadata_backends(Defs) ->
 	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
 	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
 	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
 	Itrs = [Itr2, Itr1, Itr],
-	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc) end, [], Itrs),
+	NewDefs = lists:append(Defs, [{default}, {use_default_backend}]),
+	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc, NewDefs) end, [], Itrs),
 	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
 
-iterate(Itr, Acc) ->
+iterate(Itr, Acc, Defs) ->
 	case riak_core_metadata:itr_done(Itr) of
 		true ->
 			Acc;
 		false ->
 			{Key, Config} = riak_core_metadata:itr_key_values(Itr),
 			NewItr = riak_core_metadata:itr_next(Itr),
-			case Key of
-				default ->
-					iterate(NewItr, Acc);
-				use_default_backend ->
-					iterate(NewItr, Acc);
-				_ ->
-					iterate(NewItr, [Config | Acc])
+			case lists:keymember(Key, 1, Defs) of
+				true ->
+					iterate(NewItr, Acc, Defs);
+				false ->
+					iterate(NewItr, [Config | Acc], Defs)
 			end
 	end.
 
@@ -770,10 +766,10 @@ split_backend_test_() ->
 						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
 						{ok, State} = start(42, Config),
 
-						true = check_existing_backend(B1, State),
-						true = check_existing_backend(B2, State),
+						true = check_backend_exists(B1, State),
+						true = check_backend_exists(B2, State),
 
-						false = check_existing_backend(should_not_exist, State)
+						false = check_backend_exists(should_not_exist, State)
 					end
 				}
 			end,
@@ -785,17 +781,17 @@ split_backend_test_() ->
 						Config = sample_split_bucket_config([B1, B2], riak_kv_bitcask_backend),
 						{ok, State} = start(42, Config),
 
-						true = check_existing_backend(B1, State),
-						true = check_existing_backend(B2, State),
+						true = check_backend_exists(B1, State),
+						true = check_backend_exists(B2, State),
 
-						false = check_existing_backend(new_backend, State),
+						false = check_backend_exists(new_backend, State),
 
 						NewConf = [{new_backend, riak_kv_bitcask_backend, []}, {new_backend2, riak_kv_eleveldb_backend, []}],
 
 						{ok, NewState} = start_additional_backends(42, NewConf, State),
 
-						true = check_existing_backend(new_backend, NewState),
-						true = check_existing_backend(new_backend2, NewState)
+						true = check_backend_exists(new_backend, NewState),
+						true = check_backend_exists(new_backend2, NewState)
 					end
 				}
 			end,
