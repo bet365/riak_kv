@@ -161,17 +161,17 @@ start(Partition, Config) ->
 			{First, _Mod, _ModConf} = hd(Defs),
 			DefaultName = app_helper:get_prop_or_env(split_backend_default, Config, riak_kv, First),
 
-			case lists:keymember(DefaultName, 1, Defs) of
-				true ->
-					OtherBackends = fetch_metadata_backends(Defs),
-					Final = lists:flatten([OtherBackends | Defs]),
+			case lists:keyfind(DefaultName, 1, Defs) of
+				{DefaultName, Mod, _ModConf1} ->
+					Final = fetch_metadata_backends(Defs),
+					metadata_config_puts(First, Mod),
+
 					%% Start the backends
 					BackendFun = start_backend_fun(Partition),
 					{Backends, Errors} =
 						lists:foldl(BackendFun, {[], []}, Final),
 					case Errors of
 						[] ->
-							metadata_config_puts(Defs),
 							{ok, #state{backends=Backends,
 								default_backend= DefaultName}};
 						_ ->
@@ -508,7 +508,7 @@ get_backend(Bucket, State = #state{backends=Backends, default_backend=DefaultBac
 	%% Ensure that a backend by that name exists...
 	case lists:keyfind(Bucket, 1, Backends) of
 		false ->
-			case riak_core_metadata:get({split_backend, all}, use_default_backend) of
+			case riak_core_metadata:get({split_backend, all}, use_default_backend, [{default, true}]) of
 				true ->
 					lists:keyfind(DefaultBackend, 1, Backends);    %% if no backend, return default
 				_ ->
@@ -669,15 +669,24 @@ backend_can_index_reformat(Mod, ModState) ->
 	{ok, Caps} = Mod:capabilities(ModState),
 	lists:member(index_reformat, Caps).
 
-metadata_config_puts(_Defs) ->
-	BitcaskConf = app_helper:get_env(bitcask),
-	LevelDBConf = app_helper:get_env(eleveldb),
-	MemoryConf  = app_helper:get_env(memory),
+metadata_config_puts(Name, Mod) ->
+	case Mod of
+		riak_kv_bitcask_backend ->
+			riak_core_metadata:put({split_backend, bitcask}, default, Name);
+		riak_kv_eleveldb_backend ->
+			riak_core_metadata:put({split_backend, leveldb}, default, Name);
+		riak_kv_memory_backend ->
+			riak_core_metadata:put({split_backend, memory}, default, Name)
+	end.
 
-	riak_core_metadata:put({split_backend, all}, use_default_backend, true),
-	riak_core_metadata:put({split_backend, bitcask}, default, {default_split, riak_kv_bitcask_backend, BitcaskConf}),
-	riak_core_metadata:put({split_backend, leveldb}, default, {default_split, riak_kv_eleveldb_backend, LevelDBConf}),
-	riak_core_metadata:put({split_backend, memory}, default, {default_split, riak_kv_memory_backend, MemoryConf}).
+%%	BitcaskConf = app_helper:get_env(bitcask),
+%%	LevelDBConf = app_helper:get_env(eleveldb),
+%%	MemoryConf  = app_helper:get_env(memory),
+
+%%	riak_core_metadata:put({split_backend, all}, use_default_backend, true),
+%%	riak_core_metadata:put({split_backend, bitcask}, default, {riak_kv_bitcask_backend, Name}),
+%%	riak_core_metadata:put({split_backend, leveldb}, default, {riak_kv_eleveldb_backend, Name}),
+%%	riak_core_metadata:put({split_backend, memory},  default, {riak_kv_memory_backend, MemoryConf}).
 %% TODO: Initial start up config needs adding to metadata, but doing it atr this stage triggers a race condition due to riak_kv_vnode not having finished starting up.
 %% TODO: Need to figure out how to push to the metadata without propogating to the vnode event.
 %%	lists:foreach(fun
@@ -690,27 +699,47 @@ metadata_config_puts(_Defs) ->
 %%				  end, Defs).
 
 fetch_metadata_backends(Defs) ->
-	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
-	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
-	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
-	Itrs = [Itr2, Itr1, Itr],
-	NewDefs = lists:append(Defs, [{default}, {use_default_backend}]),
-	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc, NewDefs) end, [], Itrs),
-	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
+	Itr  = riak_core_metadata:get({split_backend, bitcask}, splits, [{default, []}]),
+	Itr1 = riak_core_metadata:get({split_backend, leveldb}, splits, [{default, []}]),
+	Itr2 = riak_core_metadata:get({split_backend, memory}, splits, [{default, []}]),
+	Itrs = [{memory, Itr2}, {leveldb, Itr1}, {bitcask, Itr}],
 
-iterate(Itr, Acc, Defs) ->
-	case riak_core_metadata:itr_done(Itr) of
-		true ->
-			Acc;
+	Backends = lists:foldl(fun({Type, Splits}, Acc) -> iterate2(Type, Splits, Acc, Defs) end, [], Itrs),
+	lists:flatten([Backends | Defs]).
+
+%%fetch_metadata_backends(Defs) ->
+%%	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
+%%	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
+%%	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
+%%	Itrs = [Itr2, Itr1, Itr],
+%%	NewDefs = lists:append(Defs, [{default}, {use_default_backend}]),
+%%	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc, NewDefs) end, [], Itrs),
+%%	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
+%%
+%%iterate(Itr, Acc, Defs) ->
+%%	case riak_core_metadata:itr_done(Itr) of
+%%		true ->
+%%			Acc;
+%%		false ->
+%%			{Key, Config} = riak_core_metadata:itr_key_values(Itr),
+%%			NewItr = riak_core_metadata:itr_next(Itr),
+%%			case lists:keymember(Key, 1, Defs) of
+%%				true ->
+%%					iterate(NewItr, Acc, Defs);
+%%				false ->
+%%					iterate(NewItr, [Config | Acc], Defs)
+%%			end
+%%	end.
+
+iterate2(_Type, [], Acc, _Defs) ->
+	Acc;
+iterate2(Type, [Name | Splits], Acc, Defs) ->
+	case lists:keymember(Name, 1, Defs) of
 		false ->
-			{Key, Config} = riak_core_metadata:itr_key_values(Itr),
-			NewItr = riak_core_metadata:itr_next(Itr),
-			case lists:keymember(Key, 1, Defs) of
-				true ->
-					iterate(NewItr, Acc, Defs);
-				false ->
-					iterate(NewItr, [Config | Acc], Defs)
-			end
+			Config = riak_kv_util:get_backend_config(Name, Type),
+			iterate2(Type, Splits, [Config | Acc], Defs);
+		true ->
+			iterate2(Type, Splits, Acc, Defs)
 	end.
 
 %% ===================================================================

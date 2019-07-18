@@ -409,9 +409,10 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
-update_metadata({{{split_backend, _BackendType}, _Key}, _MD} = FullKey, Partition) ->
+update_metadata({Name, Type}, Partition) ->
+    lager:info("Event propogated to the vnode"),
     riak_core_vnode_master:sync_command({Partition, node()},
-        {update_metadata, Partition, FullKey, node()},
+        {update_metadata, Partition, {Name, Type}, node()},
         riak_kv_vnode_master,
         infinity).
 
@@ -668,17 +669,18 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
                   end,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
-handle_command({update_metadata, Partition, {{{split_backend, Type} = Prefix, Key}, _MD} = _FullKey, _Node}, _, State = #state{modstate = ModState}) ->
+handle_command({update_metadata, Partition, {Key, Type}, _Node}, _, State = #state{modstate = ModState}) ->
     case riak_kv_split_backend:check_backend_exists(atom_to_binary(Key, latin1), ModState) of
         false ->
-            Config = riak_core_metadata:get(Prefix, Key),
-            FinalConf = case Config of
-                            undefined ->
-                                get_backend_config(Type, Key);
-                            _ ->
-                                Config
-                        end,
-            {ok, NewModState} = riak_kv_split_backend:start_additional_backends(Partition, FinalConf, ModState),
+%%            Config = riak_core_metadata:get(Prefix, splits),
+%%            FinalConf = case Config of
+%%                            undefined ->
+%%                                get_backend_config(Type, Key);
+%%                            _ ->
+%%                                Config
+%%                        end,
+            Config = riak_kv_util:get_backend_config(Key, Type),
+            {ok, NewModState} = riak_kv_split_backend:start_additional_backends(Partition, Config, ModState),
             NewState = State#state{modstate = NewModState},
             {reply, ok, NewState};
         true ->
@@ -995,15 +997,6 @@ handle_coverage(?KV_INDEX_REQ{bucket=Bucket,
     %% v2 = ack-based backpressure
     handle_coverage_index(Bucket, ItemFilter, Query,
                           FilterVNodes, Sender, State, fun result_fun_ack/2).
-
-get_backend_config(Type, Name) ->
-    {DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
-    {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
-    DataRoot = re:replace(S, atom_to_list(DefName), atom_to_list(Name), [{return, list}]),
-    NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
-    {atom_to_binary(Name, latin1), Mod, NewModConf}.
-
-
 
     -spec prepare_index_query(?KV_INDEX_Q{}) -> ?KV_INDEX_Q{}.
 prepare_index_query(#riak_kv_index_v3{term_regex=RE} = Q) when

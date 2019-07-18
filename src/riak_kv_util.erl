@@ -48,7 +48,8 @@
          overload_reply/1,
          get_backend_config/3,
          is_modfun_allowed/2,
-         backend_reap_mode/1]).
+         backend_reap_mode/1,
+         get_backend_config/2]).
 
 -include_lib("riak_kv_vnode.hrl").
 
@@ -59,6 +60,7 @@
 -type riak_core_ring() :: riak_core_ring:riak_core_ring().
 -type index() :: non_neg_integer().
 -type index_n() :: {index(), pos_integer()}.
+-define(SPLITBACKENDTYPES, [{bitcask, riak_kv_bitcask_backend}, {leveldb, riak_kv_eleveldb_backend}, {memory, riak_kv_memory_backend}]).
 
 %% ===================================================================
 %% Public API
@@ -215,6 +217,16 @@ backend_reap_mode(Bucket) ->
                     end
             end
     end.
+
+get_backend_config(Name, Type) ->
+    ModConfig = app_helper:get_env(Type),
+%%	{_DefName, Mod} = riak_core_metadata:get({split_backend, Type}, default),
+
+    {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
+    NewDataRoot = atom_to_list(Type) ++ "/" ++ atom_to_list(Name),
+    DataRoot = re:replace(S, atom_to_list(Type), NewDataRoot, [{return, list}]),
+    NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
+    {atom_to_binary(Name, latin1), proplists:get_value(Type, ?SPLITBACKENDTYPES), NewModConf}.
 
 %% ===================================================================
 %% Helper functions for delete mode

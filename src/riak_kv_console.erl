@@ -625,19 +625,21 @@ add_split_backend([Type, Name]) ->
     end.
 
 put_and_confirm_metadata(Type, Name) ->
-    case riak_core_metadata:get({split_backend, Type}, Name) of
-        undefined ->
-            Config = get_backend_config(Name, Type),
-            riak_core_metadata:put({split_backend, Type}, Name, Config),
-            case riak_core_metadata:get({split_backend, Type}, Name) of
-                undefined ->
+    Splits = riak_core_metadata:get({split_backend, Type}, splits, [{default, []}]),
+    case lists:member(Name, Splits) of
+        false ->
+%%            Config = riak_kv_split_backend:get_backend_config(Name, Type),
+            riak_core_metadata:put({split_backend, Type}, splits, [Name | Splits], [{propogate_event, true}]),
+            NewSplits = riak_core_metadata:get({split_backend, Type}, splits),
+            case  lists:member(Name, NewSplits) of
+                false ->
                     io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
                     error;
-                _ ->
+                true ->
                     io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
                     ok
             end;
-        _ ->
+        true ->
             io:format("Backend already exists~n"),
             ok
     end.
@@ -876,11 +878,3 @@ bucket_error_xlate({Property, Error}) ->
     [atom_to_list(Property), ": ", io_lib:format("~p", [Error])];
 bucket_error_xlate(X) ->
     io_lib:format("~p", [X]).
-
-get_backend_config(Name, Type) ->
-    {_DefName, Mod, ModConfig} = riak_core_metadata:get({split_backend, Type}, default),
-    {data_root, S} = lists:keyfind(data_root, 1, ModConfig),
-    NewDataRoot = atom_to_list(Type) ++ "/" ++ atom_to_list(Name),
-    DataRoot = re:replace(S, atom_to_list(Type), NewDataRoot, [{return, list}]),
-    NewModConf = lists:keyreplace(data_root, 1, ModConfig, {data_root, DataRoot}),
-    {atom_to_binary(Name, latin1), Mod, NewModConf}.
