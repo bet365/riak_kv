@@ -165,6 +165,7 @@ start(Partition, Config) ->
 				{DefaultName, Mod, _ModConf1} ->
 					Final = fetch_metadata_backends(Defs),
 					metadata_config_puts(First, Mod),
+					lager:info("Split Backend Starting with Config: ~p and Metadata values: ~p~n", [Defs, Final]),
 
 					%% Start the backends
 					BackendFun = start_backend_fun(Partition),
@@ -189,11 +190,13 @@ start_additional_backends(_Partition, Config, _State) when undefined =:= Config 
 start_additional_backends(Partition, Config, State) when is_tuple(Config) ->
 	start_additional_backends(Partition, [Config], State);
 start_additional_backends(Partition, Config, State = #state{backends = CurrentBackends}) ->
+	lager:info("Starting Additional backend on partition: ~p with config: ~p~n", [Partition, Config]),
 	BackendFun = start_backend_fun(Partition),
 	{Backends, Errors} =
 		lists:foldl(BackendFun, {[], []}, Config),
 	case Errors of
 		[] ->
+			lager:info("Additional backend has started: ~p~n", [Partition]),
 			{ok, State#state{backends=lists:flatten([Backends | CurrentBackends])}};
 		_ ->
 			{error, Errors}
