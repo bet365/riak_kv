@@ -264,7 +264,7 @@ stop(#state{backends=Backends}) ->
 	{error, term(), state()}.
 get(Bucket, Key, State) ->
 	case get_backend(Bucket, State) of
-		{error, State1} = Error ->
+		{error, State1} ->
 			{error, not_found, State1};
 		{Name, Module, SubState} ->
 			case Module:get(Bucket, Key, SubState) of
@@ -322,6 +322,7 @@ put(Bucket, PrimaryKey, IndexSpecs, Value, State) ->
 delete(Bucket, Key, IndexSpecs, State) ->
 	case get_backend(Bucket, State) of
 		{error, State1} ->
+			lager:error("Failed Split backend delete due to no backend for Bucket: ~p existing", [Bucket]),
 			{error, "No backend configured to delete object from", State1};
 		{Name, Module, SubState} ->
 			case Module:delete(Bucket, Key, IndexSpecs, SubState) of
