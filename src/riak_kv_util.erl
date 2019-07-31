@@ -255,6 +255,9 @@ set_backend_reap_module_capability() ->
                       riak_kv_multi_backend ->
                           MultiBackendConfig = app_helper:get_env(riak_kv, multi_backend, []),
                           find_all_backends_capabilities(MultiBackendConfig, []);
+                      riak_kv_split_backend ->
+                          SplitBackendConfig = app_helper:get_env(riak_kv, split_backend, []),
+                          find_all_backends_capabilities(SplitBackendConfig, []);
                       Mod ->
                           case Mod:capabilities(state) of
                               {ok, Caps} ->
@@ -290,15 +293,17 @@ check_bucket(Bucket) ->
             lager:error("undefined riak_kv storage_backend environment variable"),
             false;
         riak_kv_multi_backend ->
-            check_backend_reap_module_capability(Bucket);
+            check_backend_reap_module_capability(Bucket, multi);
+        riak_kv_split_backend ->
+            check_backend_reap_module_capability(Bucket, split);
         _ ->
             true
     end.
 
-check_backend_reap_module_capability(Bucket) ->
+check_backend_reap_module_capability(Bucket, Type) ->
     case app_helper:get_env(riak_kv, bucket_to_backend_reap_capability_dict, undefined) of
         undefined ->
-            Dict = build_bucket_to_backend_reap_capability_dict(),
+            Dict = build_bucket_to_backend_reap_capability_dict(Type),
             application:set_env(riak_kv, bucket_to_backend_reap_capability_dict, Dict),
             check_bucket(Bucket, Dict);
         Dict ->
@@ -321,19 +326,26 @@ return_default_bucket_backend_capability(Dict) ->
     end.
 
 %% ================================================================================================= %%
-build_bucket_to_backend_reap_capability_dict() ->
+build_bucket_to_backend_reap_capability_dict(multi) ->
     case app_helper:get_env(riak_kv, multi_backend_default, undefined) of
         undefined ->
             dict:new();
         DefaultBucket ->
-            build_bucket_to_backend_reap_capability_dict(DefaultBucket)
-    end.
-build_bucket_to_backend_reap_capability_dict(DefaultBucket) ->
-    case app_helper:get_env(riak_kv, multi_backend, undefined) of
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket, multi_backend)
+    end;
+build_bucket_to_backend_reap_capability_dict(split) ->
+    case app_helper:get_env(riak_kv, split_backend_default, undefined) of
         undefined ->
             dict:new();
-        MultiBackendConfig ->
-            build_bucket_to_backend_reap_capability_dict(DefaultBucket, MultiBackendConfig, dict:new())
+        DefaultBucket ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket, split_backend)
+    end.
+build_bucket_to_backend_reap_capability_dict(DefaultBucket, BackendType) ->
+    case app_helper:get_env(riak_kv, BackendType, undefined) of
+        undefined ->
+            dict:new();
+        BackendConfig ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket, BackendConfig, dict:new())
     end.
 build_bucket_to_backend_reap_capability_dict(_, [], Dict) ->
     Dict;

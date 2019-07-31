@@ -135,9 +135,13 @@ capabilities(State) ->
 
 %% @doc Return the capabilities of the backend.
 -spec capabilities(riak_object:bucket(), state()) -> {ok, [atom()]}.
-capabilities(Bucket, State) when is_binary(Bucket) ->
-	{_Name, Mod, ModState} = get_backend(Bucket, State),
-	Mod:capabilities(ModState);
+capabilities(Bucket, #state{default_backend = DefBucket} = State) when is_binary(Bucket) ->
+	case get_backend(DefBucket, State) of
+		{error, State} = Error ->
+			Error;
+		{_Name, Mod, ModState} ->
+			Mod:capabilities(ModState)
+	end;
 capabilities(_Bucket, State) ->
 	capabilities(State).
 
@@ -259,14 +263,18 @@ stop(#state{backends=Backends}) ->
 	{ok, not_found, state()} |
 	{error, term(), state()}.
 get(Bucket, Key, State) ->
-	{Name, Module, SubState} = get_backend(Bucket, State),
-	case Module:get(Bucket, Key, SubState) of
-		{ok, Value, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{ok, Value, NewState};
-		{error, Reason, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{error, Reason, NewState}
+	case get_backend(Bucket, State) of
+		{error, State1} = Error ->
+			{error, not_found, State1};
+		{Name, Module, SubState} ->
+			case Module:get(Bucket, Key, SubState) of
+				{ok, Value, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{ok, Value, NewState};
+				{error, Reason, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{error, Reason, NewState}
+			end
 	end.
 
 %% @doc Insert an object with secondary index
@@ -276,10 +284,9 @@ get(Bucket, Key, State) ->
 	{ok, state()} |
 	{error, term(), state()}.
 put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, State) ->
-	{Name, Module, SubState} = get_backend(Bucket, State),
 	case get_backend(Bucket, State) of
-		{error, _, _} = Error ->
-			Error;
+		{error, State1} ->
+			{error, "Put rejected due to no backend being configured", State1};
 		{Name, Module, SubState} ->
 			case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, SubState) of
 				{ok, NewSubState} ->
@@ -294,14 +301,18 @@ put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, State) ->
 	{ok, state()} |
 	{error, term(), state()}.
 put(Bucket, PrimaryKey, IndexSpecs, Value, State) ->
-	{Name, Module, SubState} = get_backend(Bucket, State),
-	case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, SubState) of
-		{ok, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{ok, NewState};
-		{error, Reason, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{error, Reason, NewState}
+	case get_backend(Bucket, State) of
+		{error, State1} ->
+			{error, "Put rejected due to no backend being configured", State1};
+		{Name, Module, SubState} ->
+			case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, SubState) of
+				{ok, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{ok, NewState};
+				{error, Reason, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{error, Reason, NewState}
+			end
 	end.
 
 %% @doc Delete an object from the backend
@@ -309,14 +320,18 @@ put(Bucket, PrimaryKey, IndexSpecs, Value, State) ->
 	{ok, state()} |
 	{error, term(), state()}.
 delete(Bucket, Key, IndexSpecs, State) ->
-	{Name, Module, SubState} = get_backend(Bucket, State),
-	case Module:delete(Bucket, Key, IndexSpecs, SubState) of
-		{ok, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{ok, NewState};
-		{error, Reason, NewSubState} ->
-			NewState = update_backend_state(Name, Module, NewSubState, State),
-			{error, Reason, NewState}
+	case get_backend(Bucket, State) of
+		{error, State1} ->
+			{error, "No backend configured to delete object from", State1};
+		{Name, Module, SubState} ->
+			case Module:delete(Bucket, Key, IndexSpecs, SubState) of
+				{ok, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{ok, NewState};
+				{error, Reason, NewSubState} ->
+					NewState = update_backend_state(Name, Module, NewSubState, State),
+					{error, Reason, NewState}
+			end
 	end.
 
 %% @doc Fold over all the buckets
@@ -515,7 +530,7 @@ get_backend(Bucket, State = #state{backends=Backends, default_backend=DefaultBac
 				true ->
 					lists:keyfind(DefaultBackend, 1, Backends);    %% if no backend, return default
 				_ ->
-					throw({error, "Put rejected due to no backend being configured", State})
+					{error, State}
 			end;
 		Backend -> Backend
 	end.
@@ -569,11 +584,15 @@ fold_all(ModFun, FoldFun, Acc, Opts, State, BackendFilter) ->
 	end.
 
 fold_in_bucket(Bucket, ModFun, FoldFun, Acc, Opts, State) ->
-	{_Name, Module, SubState} = get_backend(Bucket, State),
-	Module:ModFun(FoldFun,
-		Acc,
-		Opts,
-		SubState).
+	case get_backend(Bucket, State) of
+		{error, State} ->
+			{ok, Acc};
+		{_Name, Module, SubState} ->
+			Module:ModFun(FoldFun,
+				Acc,
+				Opts,
+				SubState)
+	end.
 
 default_backend_filter(Opts, Name, _Module, _SubState, ModCaps) ->
 	filter_on_backend_opts(Opts, Name) andalso
