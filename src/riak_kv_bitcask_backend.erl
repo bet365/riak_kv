@@ -42,8 +42,8 @@
          callback/3]).
 
 -export([data_size/1,
-         key_transform_to_1/1,
-         key_transform_to_2/1]).
+         encode_disk_key/4,
+         decode_disk_key/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -63,10 +63,13 @@
 
 %% must not be 131, otherwise will match t2b in error
 %% yes, I know that this is horrible.
+-define(VERSION_0, 131).
 -define(VERSION_1, 1).
 -define(VERSION_2, 2).
--define(VERSION_BYTE, ?VERSION_2).
--define(CURRENT_KEY_TRANS, fun key_transform_to_2/1).
+
+-define(CURRENT_VERSION, ?VERSION_2).
+-define(ENCODE_DISK_KEY, fun encode_disk_key/1).
+-define(DECODE_DISK_KEY, fun decode_disk_key/1).
 
 -record(state, {ref :: reference(),
                 data_dir :: string(),
@@ -100,126 +103,14 @@ capabilities(_) ->
 capabilities(_, _) ->
     {ok, ?CAPABILITIES}.
 
-%% @doc Transformation functions for the keys coming off the disk.
-key_transform_to_2(<<?VERSION_BYTE:7, Type:1, TstampExpire:32/integer, Rest/binary>>) ->
-    {<<?VERSION_BYTE:7, Type:1, Rest/binary>>, #keymeta{tstamp_expire = TstampExpire}};
-key_transform_to_2(<<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
-    {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
-key_transform_to_2(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
-    {make_kd(?VERSION_BYTE, {Type, Bucket}, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}};
-key_transform_to_2(<<131:8,_Rest/bits>> = Key0) ->
-    {Bucket, Key} = binary_to_term(Key0),
-    {make_kd(?VERSION_BYTE, Bucket, Key), #keymeta{tstamp_expire = ?DEFAULT_TSTAMP_EXPIRE}}.
-
-
-
-key_transform_to_1(<<?VERSION_2:7, Type:1/integer, _:32, Rest/binary>>) ->
-    {<<?VERSION_1:7, Type:1, Rest/binary>>, #keymeta{}};
-key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
-    {Key, #keymeta{}};
-key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
-    {Bucket, Key} = binary_to_term(Key0),
-    {make_kd(?VERSION_1, Bucket, Key), #keymeta{}}.
-
-key_transform_to_0(<<?VERSION_2:7,_Rest/bits>> = Key0) ->
-    {term_to_binary(bk_to_tuple_0(Key0)), #keymeta{}};
-key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
-    {term_to_binary(bk_to_tuple(Key0)), #keymeta{}};
-key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
-    {Key, #keymeta{}}.
-
-bk_to_tuple_0(<<?VERSION_2:7, HasType:1, _:32, Sz:16/integer,
-             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
-    case HasType of
-        0 ->
-            %% no type, first field is bucket
-            {TypeOrBucket, Rest};
-        1 ->
-            %% has a tyoe, extract bucket as well
-            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
-            {{TypeOrBucket, Bucket}, Key}
-    end.
-
-bk_to_tuple(<<?VERSION_2:7, HasType:1, Sz:16/integer,
-             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
-    case HasType of
-        0 ->
-            %% no type, first field is bucket
-            {TypeOrBucket, Rest};
-        1 ->
-            %% has a tyoe, extract bucket as well
-            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
-            {{TypeOrBucket, Bucket}, Key}
-    end;
-bk_to_tuple(<<?VERSION_1:7, HasType:1, Sz:16/integer,
-             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
-    case HasType of
-        0 ->
-            %% no type, first field is bucket
-            {TypeOrBucket, Rest};
-        1 ->
-            %% has a tyoe, extract bucket as well
-            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
-            {{TypeOrBucket, Bucket}, Key}
-    end;
-bk_to_tuple(<<131:8,_Rest/binary>> = BK) ->
-    binary_to_term(BK).
-
-make_bk(0, Bucket, Key, _TstampExpire) ->
-    term_to_binary({Bucket, Key});
-make_bk(1, {Type, Bucket}, Key, _TstampExpire) ->
-    TypeSz = size(Type),
-    BucketSz = size(Bucket),
-    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
-      BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_bk(1, Bucket, Key, _TstampExpire) ->
-    BucketSz = size(Bucket),
-    <<?VERSION_1:7, 0:1, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>;
-make_bk(2, {Type, Bucket}, Key, TstampExpire) ->
-    TypeSz = size(Type),
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, 
-      BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_bk(2, Bucket, Key, TstampExpire) ->
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, TstampExpire:32/integer, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>.
-
-make_kd(0, Bucket, Key) ->
-    term_to_binary({Bucket, Key});
-make_kd(1, {Type, Bucket}, Key) ->
-    TypeSz = size(Type),
-    BucketSz = size(Bucket),
-    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
-      BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_kd(1, Bucket, Key) ->
-    BucketSz = size(Bucket),
-    <<?VERSION_1:7, 0:1, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>;
-make_kd(2, {Type, Bucket}, Key) ->
-    TypeSz = size(Type),
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_kd(2, Bucket, Key) ->
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
-
 %% @doc Start the bitcask backend
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config0) ->
     random:seed(erlang:now()),
-    {Config, KeyVsn} =
-        case app_helper:get_prop_or_env(small_keys, Config0, bitcask) of
-            false ->
-                C0 = proplists:delete(small_keys, Config0),
-                C1 = C0 ++ [{key_transform, fun key_transform_to_0/1}],
-                {C1, 0};
-            _ ->
-                C0 = proplists:delete(small_keys, Config0),
-                C1 = C0 ++ [{key_transform, ?CURRENT_KEY_TRANS}],
-                {C1, ?VERSION_BYTE}
-        end,
+
+    C0 = proplists:delete(small_keys, Config0),
+    C1 = C0 ++ [{key_transform, ?CURRENT_KEY_TRANS}],
+    {Config, KeyVsn} = {C1, ?VERSION_BYTE},
 
     %% Get the data root directory
     case app_helper:get_prop_or_env(data_root, Config, bitcask) of
@@ -550,8 +441,88 @@ callback(_Ref, _Msg, State) ->
     {ok, State}.
 
 %% ===================================================================
+%% Key Encode and Decode Functions
+%% ===================================================================
+
+make_kd(0, Bucket, Key) ->
+    term_to_binary({Bucket, Key});
+
+make_kd(1, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(1, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_kd(2, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(2, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
+
+
+
+decode_disk_key(<<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/binary>>) ->
+    #keyinfo{
+        key = <<?CURRENT_VERSION:7, Type:1, Rest/binary>>,
+        tstamp_expire = TstampExpire
+    };
+
+decode_disk_key(<<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+    #keyinfo{
+        key = make_kd(?CURRENT_VERSION, Bucket, Key)
+    };
+
+decode_disk_key(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+    #keyinfo{
+        key = make_kd(?CURRENT_VERSION, {Type, Bucket}, Key)
+    };
+
+decode_disk_key(<<?VERSION_0:8,_Rest/bits>> = Key0) ->
+    {Bucket, Key} = binary_to_term(Key0),
+    #keyinfo{
+        key = make_kd(?CURRENT_VERSION, Bucket, Key)
+    }.
+
+
+encode_disk_key(0, Bucket, Key, _Opts) ->
+    term_to_binary({Bucket, Key});
+
+encode_disk_key(1, {Type, Bucket}, Key, _Opts) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary,Key/binary>>;
+
+encode_disk_key(1, Bucket, Key, _Opts) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+encode_disk_key(2, {Type, Bucket}, Key, Opts) ->
+    TstampExpire = orddict_safe_get(Opts, tstamp_expire, ?DEFAULT_TSTAMP_EXPIRE),
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 1:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+encode_disk_key(2, Bucket, Key, Opts) ->
+    TstampExpire = orddict_safe_get(Opts, tstamp_expire, ?DEFAULT_TSTAMP_EXPIRE),
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 0:1, TstampExpire:32/integer, BucketSz:16/integer, Bucket/binary, Key/binary>>.
+
+
+%% ===================================================================
 %% Internal functions
 %% ===================================================================
+
+orddict_safe_get(Orddict, Key, Default) ->
+    case orddict:find(Key, Orddict) of
+        error ->
+            Default;
+        Value ->
+            Value
+    end.
 
 % @private If no pending merges, check if files need to be merged.
 merge_check(Ref, BitcaskRoot, BitcaskOpts) ->
