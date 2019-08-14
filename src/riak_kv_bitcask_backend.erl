@@ -71,6 +71,12 @@
 -define(ENCODE_DISK_KEY, fun encode_disk_key/1).
 -define(DECODE_DISK_KEY, fun decode_disk_key/1).
 
+
+-define(TSTAMP_EXPIRE_KEY, tstamp_expire).
+-define(DECODE_DISK_KEY_DEFAULT_OPTS, [{?TSTAMP_EXPIRE_KEY, ?DEFAULT_TSTAMP_EXPIRE}]).
+
+
+
 -record(state, {ref :: reference(),
                 data_dir :: string(),
                 opts :: [{atom(), term()}],
@@ -108,9 +114,15 @@ capabilities(_, _) ->
 start(Partition, Config0) ->
     random:seed(erlang:now()),
 
-    C0 = proplists:delete(small_keys, Config0),
-    C1 = C0 ++ [{key_transform, ?CURRENT_KEY_TRANS}],
-    {Config, KeyVsn} = {C1, ?VERSION_BYTE},
+    BaseConfig = proplists:delete(small_keys, Config0),
+    KeyOpts =
+        [
+            {encode_disk_key, ?ENCODE_DISK_KEY},
+            {decode_disk_key, ?DECODE_DISK_KEY},
+            {decode_disk_key_default_opts, ?DECODE_DISK_KEY_DEFAULT_OPTS}
+        ],
+    Config = BaseConfig ++ KeyOpts,
+    KeyVsn = ?CURRENT_VERSION,
 
     %% Get the data root directory
     case app_helper:get_prop_or_env(data_root, Config, bitcask) of
@@ -165,7 +177,7 @@ stop(#state{ref=Ref}) ->
                  {error, not_found, state()} |
                  {error, term(), state()}.
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
-    BitcaskKey = make_kd(KVers, Bucket, Key),
+    BitcaskKey = make_bitcask_key(KVers, Bucket, Key),
     case bitcask:get(Ref, BitcaskKey) of
         {ok, Value} ->
             {ok, Value, State};
@@ -189,11 +201,10 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire,
-    #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey, TstampExpire),
-    {KeyDirKey, _} = ?CURRENT_KEY_TRANS(BitcaskKey),
-    case bitcask:put(Ref, KeyDirKey, BitcaskKey, Val, TstampExpire) of
+put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
+    Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}],
+    case bitcask:put(Ref, BitcaskKey, Val, Opts) of
         ok ->
             {ok, State};
         {error, Reason} ->
@@ -203,11 +214,9 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire,
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val,
-    #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey, ?DEFAULT_TSTAMP_EXPIRE),
-    {KeyDirKey, _} = ?CURRENT_KEY_TRANS(BitcaskKey),
-    case bitcask:put(Ref, KeyDirKey, BitcaskKey, Val, ?DEFAULT_TSTAMP_EXPIRE) of
+put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
+    case bitcask:put(Ref, BitcaskKey, Val) of
         ok ->
             {ok, State};
         {error, Reason} ->
@@ -220,11 +229,9 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val,
 %% is ignored.
 -spec delete(riak_object:bucket(), riak_object:key(), [index_spec()], state()) ->
                     {ok, state()}.
-delete(Bucket, Key, _IndexSpecs,
-       #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, Key, ?DEFAULT_TSTAMP_EXPIRE),
-    {KeyDirKey, _} = ?CURRENT_KEY_TRANS(BitcaskKey),
-    ok = bitcask:delete(Ref, KeyDirKey, BitcaskKey),
+delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, Key),
+    ok = bitcask:delete(Ref, BitcaskKey),
     {ok, State}.
 
 %% @doc Fold over all the buckets.
@@ -444,22 +451,24 @@ callback(_Ref, _Msg, State) ->
 %% Key Encode and Decode Functions
 %% ===================================================================
 
-make_kd(0, Bucket, Key) ->
+make_bitcask_key(0, Bucket, Key) ->
     term_to_binary({Bucket, Key});
 
-make_kd(1, {Type, Bucket}, Key) ->
+make_bitcask_key(1, {Type, Bucket}, Key) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
     <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_kd(1, Bucket, Key) ->
+
+make_bitcask_key(1, Bucket, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
 
-make_kd(2, {Type, Bucket}, Key) ->
+make_bitcask_key(2, {Type, Bucket}, Key) ->
     TypeSz = size(Type),
     BucketSz = size(Bucket),
     <<?VERSION_2:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_kd(2, Bucket, Key) ->
+
+make_bitcask_key(2, Bucket, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
@@ -473,18 +482,18 @@ decode_disk_key(<<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/binary>>) 
 
 decode_disk_key(<<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
     #keyinfo{
-        key = make_kd(?CURRENT_VERSION, Bucket, Key)
+        key = make_bitcask_key(?CURRENT_VERSION, Bucket, Key)
     };
 
 decode_disk_key(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
     #keyinfo{
-        key = make_kd(?CURRENT_VERSION, {Type, Bucket}, Key)
+        key = make_bitcask_key(?CURRENT_VERSION, {Type, Bucket}, Key)
     };
 
 decode_disk_key(<<?VERSION_0:8,_Rest/bits>> = Key0) ->
     {Bucket, Key} = binary_to_term(Key0),
     #keyinfo{
-        key = make_kd(?CURRENT_VERSION, Bucket, Key)
+        key = make_bitcask_key(?CURRENT_VERSION, Bucket, Key)
     }.
 
 
@@ -501,13 +510,13 @@ encode_disk_key(1, Bucket, Key, _Opts) ->
     <<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
 
 encode_disk_key(2, {Type, Bucket}, Key, Opts) ->
-    TstampExpire = orddict_safe_get(Opts, tstamp_expire, ?DEFAULT_TSTAMP_EXPIRE),
+    TstampExpire = get_opt(Opts, ?TSTAMP_EXPIRE_KEY, ?DEFAULT_TSTAMP_EXPIRE),
     TypeSz = size(Type),
     BucketSz = size(Bucket),
     <<?VERSION_2:7, 1:1, TstampExpire:32/integer, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
 
 encode_disk_key(2, Bucket, Key, Opts) ->
-    TstampExpire = orddict_safe_get(Opts, tstamp_expire, ?DEFAULT_TSTAMP_EXPIRE),
+    TstampExpire = get_opt(Opts, ?TSTAMP_EXPIRE_KEY, ?DEFAULT_TSTAMP_EXPIRE),
     BucketSz = size(Bucket),
     <<?VERSION_2:7, 0:1, TstampExpire:32/integer, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
@@ -516,12 +525,12 @@ encode_disk_key(2, Bucket, Key, Opts) ->
 %% Internal functions
 %% ===================================================================
 
-orddict_safe_get(Orddict, Key, Default) ->
-    case orddict:find(Key, Orddict) of
-        error ->
-            Default;
-        Value ->
-            Value
+get_opt(List, Key, Default) ->
+    case lists:keyfind(Key, 1, List) of
+        {Key, Value} ->
+            Value;
+        _ ->
+            Default
     end.
 
 % @private If no pending merges, check if files need to be merged.
