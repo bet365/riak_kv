@@ -68,12 +68,12 @@
 -define(VERSION_2, 2).
 
 -define(CURRENT_VERSION, ?VERSION_2).
--define(ENCODE_DISK_KEY, fun encode_disk_key/1).
--define(DECODE_DISK_KEY, fun decode_disk_key/1).
+-define(ENCODE_DISK_KEY_FUN, fun encode_disk_key/2).
+-define(DECODE_DISK_KEY_FUN, fun decode_disk_key/1).
 
 
--define(TSTAMP_EXPIRE_KEY, tstamp_expire).
--define(DECODE_DISK_KEY_DEFAULT_OPTS, [{?TSTAMP_EXPIRE_KEY, ?DEFAULT_TSTAMP_EXPIRE}]).
+
+-define(ENCODE_DISK_KEY_DEFAULT_OPTS, [{?TSTAMP_EXPIRE_KEY, ?DEFAULT_TSTAMP_EXPIRE}]).
 
 
 
@@ -117,9 +117,9 @@ start(Partition, Config0) ->
     BaseConfig = proplists:delete(small_keys, Config0),
     KeyOpts =
         [
-            {encode_disk_key, ?ENCODE_DISK_KEY},
-            {decode_disk_key, ?DECODE_DISK_KEY},
-            {decode_disk_key_default_opts, ?DECODE_DISK_KEY_DEFAULT_OPTS}
+            {encode_disk_key_fun, ?ENCODE_DISK_KEY_FUN},
+            {encode_disk_key_default_opts, ?ENCODE_DISK_KEY_DEFAULT_OPTS},
+            {decode_disk_key_fun, ?DECODE_DISK_KEY_FUN}
         ],
     Config = BaseConfig ++ KeyOpts,
     KeyVsn = ?CURRENT_VERSION,
