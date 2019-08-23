@@ -218,7 +218,7 @@ backend_reap_mode(Bucket) ->
             end
     end.
 
-get_backend_config(Name, Type) ->
+ get_backend_config(Name, Type) ->
     ModConfig = app_helper:get_env(Type),
 %%	{_DefName, Mod} = riak_core_metadata:get({split_backend, Type}, default),
 

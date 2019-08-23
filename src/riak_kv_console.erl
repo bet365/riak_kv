@@ -45,7 +45,8 @@
          bucket_type_update/1,
          bucket_type_reset/1,
          bucket_type_list/1,
-         add_split_backend/1
+         add_split_backend/1,
+    	 remove_split_backend/1
 ]).
 
 -export([ensemble_status/1]).
@@ -624,22 +625,58 @@ add_split_backend([Type, Name]) ->
             error
     end.
 
+remove_split_backend([Type, Name]) when is_list(Type) andalso is_list(Name) ->
+    remove_split_backend([list_to_atom(Type), list_to_atom(Name)]);
+remove_split_backend([Type, Name]) ->
+    case riak_core_metadata:get({split_backend, Type}, Name) of
+        undefined ->
+            io:format("Attempting to remove backend ~p but it does not exist in metadata.", [{Type, Name}]);
+        _ ->
+            riak_core_metadata:delete({split_backend, Type}, Name),
+            case riak_core_metadata:get({split_backend, Type}, Name) of
+                undefined ->
+                    io:format("Succesfully removed backend: ~p~n", [{Type, Name}]),
+                    ok;
+                _ ->
+                    io:format("Failed to remove Backend: ~p~n", [{Type, Name}]),
+                    error
+            end
+    end.
+
+%%put_and_confirm_metadata(Type, Name) ->
+%%    Splits = riak_core_metadata:get({split_backend, Type}, splits, [{default, []}]),
+%%    case lists:member(Name, Splits) of
+%%        false ->
+%%%%            Config = riak_kv_split_backend:get_backend_config(Name, Type),
+%%            riak_core_metadata:put({split_backend, Type}, splits, [Name | Splits], [{propogate_event, true}]),
+%%            NewSplits = riak_core_metadata:get({split_backend, Type}, splits),
+%%            case  lists:member(Name, NewSplits) of
+%%                false ->
+%%                    io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
+%%                    error;
+%%                true ->
+%%                    io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
+%%                    ok
+%%            end;
+%%        true ->
+%%            io:format("Backend already exists~n"),
+%%            ok
+%%    end.
+
 put_and_confirm_metadata(Type, Name) ->
-    Splits = riak_core_metadata:get({split_backend, Type}, splits, [{default, []}]),
-    case lists:member(Name, Splits) of
-        false ->
+    case riak_core_metadata:get({split_backend, Type}, Name) of
+        undefined ->
 %%            Config = riak_kv_split_backend:get_backend_config(Name, Type),
-            riak_core_metadata:put({split_backend, Type}, splits, [Name | Splits], [{propogate_event, true}]),
-            NewSplits = riak_core_metadata:get({split_backend, Type}, splits),
-            case  lists:member(Name, NewSplits) of
-                false ->
+            riak_core_metadata:put({split_backend, Type}, Name, []),
+            case riak_core_metadata:get({split_backend, Type}, Name) of
+                undefined ->
                     io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
                     error;
-                true ->
+                _ ->
                     io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
                     ok
             end;
-        true ->
+        _ ->
             io:format("Backend already exists~n"),
             ok
     end.

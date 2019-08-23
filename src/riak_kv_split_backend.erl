@@ -75,6 +75,7 @@
 	put/6,
 	delete/4,
 	drop/1,
+	drop_backend/2,
 	fold_buckets/4,
 	fold_keys/4,
 	fold_objects/4,
@@ -124,6 +125,7 @@ capabilities(State) ->
 		ordsets:from_list(S1)
 		end,
 	AllCaps = [F(Mod, ModState) || {_, Mod, ModState} <- State#state.backends],
+	lager:info("Capabilities state backend: ~p~n", [State#state.backends]),
 	Caps1 = ordsets:intersection(AllCaps),
 	Caps2 = ordsets:to_list(Caps1),
 
@@ -241,11 +243,20 @@ start_backend(Name, Module, Partition, Config) ->
 			{Module, Reason1}
 	end.
 
-check_backend_exists(Key, #state{backends = CurrentBackends}) ->
+check_backend_exists(Key, #state{backends = CurrentBackends, default_backend = DefaultName}) ->
 	lager:info("Current Backends: ~p~n", [CurrentBackends]),
 	case lists:keyfind(Key, 1, CurrentBackends) of
 		false ->
-			false;
+			{DefaultName, Mod, ModState} = lists:keyfind(DefaultName, 1, CurrentBackends),
+			FoldFun = fun(Bucket, Acc) -> [Bucket | Acc] end,
+			{ok, Buckets} = Mod:fold_buckets(FoldFun, [], [], ModState),
+			lager:info("Buckets: ~p~n", [Buckets]),
+			case lists:keyfind(Key, 1, Buckets) of
+				false ->
+					false;
+				true ->
+					true
+			end;
 		_ ->
 			true
 	end.
@@ -397,6 +408,36 @@ drop(#state{backends=Backends}=State) ->
 		_ ->
 			{error, Errors, State#state{backends=UpdBackends}}
 	end.
+
+drop_backend(Name, #state{backends=Backends} = State) ->
+	lager:info("Attempting to drop backend name: ~p and list: ~p~n", [Name, Backends]),
+	case lists:keyfind(Name, 1, Backends) of
+		false ->
+			error;
+		{Name, Module, ModState} ->
+			case Module:drop(ModState) of
+				{ok, NewSubState} ->
+					Backend = {Name, Module, NewSubState},
+					lager:info("Dropping backend Name: ~p, Return from Bitcask backend with the new state: ~p~n", [Name, Backend]),
+					NewBackends = lists:keydelete(Name, 1, Backends),
+					lager:info("Backends before deleting: ~p~n", [Backends]),
+					lager:info("Backends after deleting: ~p~n", [NewBackends]),
+					ok = clean_data_dir(NewSubState),
+					{ok, State#state{backends=NewBackends}};
+				{error, Reason, NewSubState} ->
+					{error, Reason, NewSubState}
+			end
+	end.
+
+clean_data_dir(SubState) ->
+	DataRoot = element(6, SubState),
+	case file:list_dir(DataRoot) of
+		{ok, []} ->
+			file:del_dir(DataRoot);
+		_ ->
+			ok
+	end.
+
 
 %% @doc Returns true if the backend contains any
 %% non-tombstone values; otherwise returns false.
@@ -721,49 +762,57 @@ metadata_config_puts(Name, Mod) ->
 %%						  riak_core_metadata:put({split_backend, memory}, binary_to_atom(Name, latin1), {Name, riak_kv_memory_backend, ModConf})
 %%				  end, Defs).
 
+%%fetch_metadata_backends(Defs) ->
+%%	Itr  = riak_core_metadata:get({split_backend, bitcask}, splits, [{default, []}]),
+%%	Itr1 = riak_core_metadata:get({split_backend, leveldb}, splits, [{default, []}]),
+%%	Itr2 = riak_core_metadata:get({split_backend, memory}, splits, [{default, []}]),
+%%	Itrs = [{memory, Itr2}, {leveldb, Itr1}, {bitcask, Itr}],
+%%
+%%	Backends = lists:foldl(fun({Type, Splits}, Acc) -> iterate2(Type, Splits, Acc, Defs) end, [], Itrs),
+%%	lists:flatten([Backends | Defs]).
+
 fetch_metadata_backends(Defs) ->
-	Itr  = riak_core_metadata:get({split_backend, bitcask}, splits, [{default, []}]),
-	Itr1 = riak_core_metadata:get({split_backend, leveldb}, splits, [{default, []}]),
-	Itr2 = riak_core_metadata:get({split_backend, memory}, splits, [{default, []}]),
+	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
+	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
+	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
 	Itrs = [{memory, Itr2}, {leveldb, Itr1}, {bitcask, Itr}],
 
-	Backends = lists:foldl(fun({Type, Splits}, Acc) -> iterate2(Type, Splits, Acc, Defs) end, [], Itrs),
-	lists:flatten([Backends | Defs]).
-
-%%fetch_metadata_backends(Defs) ->
-%%	Itr = riak_core_metadata:iterator({split_backend, bitcask}),
-%%	Itr1 = riak_core_metadata:iterator({split_backend, leveldb}),
-%%	Itr2 = riak_core_metadata:iterator({split_backend, memory}),
-%%	Itrs = [Itr2, Itr1, Itr],
-%%	NewDefs = lists:append(Defs, [{default}, {use_default_backend}]),
-%%	Backends1 = lists:foldl(fun(X, Acc) -> iterate(X, Acc, NewDefs) end, [], Itrs),
+	NewDefs = lists:append(Defs, [{default}]),
+	Backends1 = lists:foldl(fun({Type, Iterator}, Acc) -> iterate(Type, Iterator, Acc, NewDefs) end, [], Itrs),
+	lists:flatten([Backends1 | Defs]).
 %%	lists:flatten([X || X <- Backends1, X =/= ['$deleted']]).
-%%
-%%iterate(Itr, Acc, Defs) ->
-%%	case riak_core_metadata:itr_done(Itr) of
-%%		true ->
-%%			Acc;
-%%		false ->
-%%			{Key, Config} = riak_core_metadata:itr_key_values(Itr),
-%%			NewItr = riak_core_metadata:itr_next(Itr),
-%%			case lists:keymember(Key, 1, Defs) of
-%%				true ->
-%%					iterate(NewItr, Acc, Defs);
-%%				false ->
-%%					iterate(NewItr, [Config | Acc], Defs)
-%%			end
-%%	end.
 
-iterate2(_Type, [], Acc, _Defs) ->
-	Acc;
-iterate2(Type, [Name | Splits], Acc, Defs) ->
-	case lists:keymember(Name, 1, Defs) of
-		false ->
-			Config = riak_kv_util:get_backend_config(Name, Type),
-			iterate2(Type, Splits, [Config | Acc], Defs);
+iterate(Type, Itr, Acc, Defs) ->
+	case riak_core_metadata:itr_done(Itr) of
 		true ->
-			iterate2(Type, Splits, Acc, Defs)
+			Acc;
+		false ->
+			{Key, Val} = riak_core_metadata:itr_key_values(Itr),
+			NewItr = riak_core_metadata:itr_next(Itr),
+			case lists:keymember(Key, 1, Defs) of
+				true ->
+					iterate(Type, NewItr, Acc, Defs);
+				false ->
+					case Val of
+						['$deleted'] ->
+							iterate(Type, NewItr, Acc, Defs);
+						[[]] ->
+							Config = riak_kv_util:get_backend_config(Key, Type),
+							iterate(Type, NewItr, [Config | Acc], Defs)
+					end
+			end
 	end.
+
+%%iterate2(_Type, [], Acc, _Defs) ->
+%%	Acc;
+%%iterate2(Type, [Name | Splits], Acc, Defs) ->
+%%	case lists:keymember(Name, 1, Defs) of
+%%		false ->
+%%			Config = riak_kv_util:get_backend_config(Name, Type),
+%%			iterate2(Type, Splits, [Config | Acc], Defs);
+%%		true ->
+%%			iterate2(Type, Splits, Acc, Defs)
+%%	end.
 
 %% ===================================================================
 %% EUnit tests

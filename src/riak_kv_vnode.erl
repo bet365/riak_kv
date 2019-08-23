@@ -669,9 +669,15 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
                   end,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
-handle_command({update_metadata, Partition, {Key, Type}, _Node}, _, State = #state{modstate = ModState}) ->
-    case riak_kv_split_backend:check_backend_exists(atom_to_binary(Key, latin1), ModState) of
-        false ->
+handle_command({update_metadata, Partition, {{Key, Type}, Metadata}, _Node}, _, State = #state{modstate = ModState}) ->
+    case riak_core_metadata_object:value(Metadata) of
+        '$deleted' ->
+            {ok, NewModState} = riak_kv_split_backend:drop_backend(atom_to_binary(Key, latin1), ModState),
+            NewState = State#state{modstate = NewModState},
+            {reply, ok, NewState};
+        _ ->
+            case riak_kv_split_backend:check_backend_exists(atom_to_binary(Key, latin1), ModState) of
+                false ->
 %%            Config = riak_core_metadata:get(Prefix, splits),
 %%            FinalConf = case Config of
 %%                            undefined ->
@@ -679,13 +685,14 @@ handle_command({update_metadata, Partition, {Key, Type}, _Node}, _, State = #sta
 %%                            _ ->
 %%                                Config
 %%                        end,
-            Config = riak_kv_util:get_backend_config(Key, Type),
-            {ok, NewModState} = riak_kv_split_backend:start_additional_backends(Partition, Config, ModState),
-            NewState = State#state{modstate = NewModState},
-            {reply, ok, NewState};
-        true ->
-            lager:debug("Vnode attempted to start new split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Key}, ModState]),
-            {reply, ok, State}
+                    Config = riak_kv_util:get_backend_config(Key, Type),
+                    {ok, NewModState} = riak_kv_split_backend:start_additional_backends(Partition, Config, ModState),
+                    NewState = State#state{modstate = NewModState},
+                    {reply, ok, NewState};
+                true ->
+                    lager:debug("Vnode attempted to start new split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Key}, ModState]),
+                    {reply, ok, State}
+            end
     end;
 
 %% entropy exchange commands
