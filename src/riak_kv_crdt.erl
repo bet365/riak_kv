@@ -411,9 +411,11 @@ meta(Meta, _CRDT) ->
 merge_meta(CType, Meta1, Meta2) ->
     Meta = case later(lastmod(Meta1), lastmod(Meta2)) of
         true ->
-            Meta1;
+            MergeFun = fun(_, Value1, _) -> Value1 end,
+            dict:merge(MergeFun, Meta1, Meta2);
         false ->
-            Meta2
+            MergeFun = fun(_, _, Value2) -> Value2 end,
+            dict:merge(MergeFun, Meta1, Meta2)
            end,
     %% Make sure the content type is
     %% up-to-date
