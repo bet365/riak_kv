@@ -234,6 +234,7 @@ start(Partition, Config0) ->
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
+                  lager:info("Starting bitcassk backend with the following dir: ~p~n", [BitcaskDir]),
                     case bitcask:open(BitcaskDir, BitcaskOpts) of
                         Ref when is_reference(Ref) ->
                             check_fcntl(),

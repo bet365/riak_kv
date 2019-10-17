@@ -87,16 +87,21 @@
 	fix_index/3,
 	set_legacy_indexes/2,
 	mark_indexes_fixed/2,
-	fixed_index_status/1
+	fixed_index_status/1,
+	transfer_to_splits/2
 ]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
+-include_lib("bitcask/include/bitcask.hrl").
 -define(API_VERSION, 1).
 -define(CAPABILITIES, [async_fold, index_reformat]).
 -define(ANY_CAPABILITIES, [indexes, iterator_refresh, backend_reap]).
+-define(VERSION_1, 1).
+-define(VERSION_2, 2).
+-define(VERSION_BYTE, ?VERSION_2).
 
 -record (state, {backends :: [{atom(), atom(), term()}], % [{BackendName, BackendModule, SubState}]
 	default_backend :: atom()}).
@@ -244,11 +249,12 @@ start_backend(Name, Module, Partition, Config) ->
 	end.
 
 check_backend_exists(Key, #state{backends = CurrentBackends, default_backend = DefaultName}) ->
-	lager:info("Current Backends: ~p~n", [CurrentBackends]),
+	lager:info("Looking for Key: ~p Current Backends: ~p~n", [Key, CurrentBackends]),
 	case lists:keyfind(Key, 1, CurrentBackends) of
 		false ->
 			{DefaultName, Mod, ModState} = lists:keyfind(DefaultName, 1, CurrentBackends),
-			FoldFun = fun(Bucket, Acc) -> [Bucket | Acc] end,
+			lager:info("Default name: ~p and ModState to search: ~p~n", [DefaultName, ModState]),
+			FoldFun = fun(Bucket, Acc) -> lager:info("FoldBucket, Fun, Bucket: ~p and Acc~p~n", [Bucket, Acc]), [Bucket | Acc] end,
 			{ok, Buckets} = Mod:fold_buckets(FoldFun, [], [], ModState),
 			lager:info("Buckets: ~p~n", [Buckets]),
 			case lists:keyfind(Key, 1, Buckets) of
@@ -555,6 +561,96 @@ fixed_index_status(Mod, ModState, Status) ->
 		true -> proplists:get_value(fixed_indexes, Status);
 		false -> undefined
 	end.
+
+
+
+transfer_to_splits(CurrentBitcaskDir, Splits) ->
+	lager:info("Top level bitcask dir fed into function call: ~p~n", [CurrentBitcaskDir]),
+	lists:foreach(
+		fun(BitcaskDir) ->
+			case bitcask:open(BitcaskDir, []) of
+				Ref when is_reference(Ref) ->
+					lists:foreach(fun(Bucket) -> fold_data(Ref, Bucket) end, Splits);
+				Reason ->
+					lager:error("Failed to open bitcask dir: ~p for reason: ~p~n", [BitcaskDir, Reason])
+			end
+		end, filelib:wildcard(CurrentBitcaskDir ++ "*")).
+
+
+fold_data(Ref, Bucket) ->
+	lager:info("Test get request: ~p~n", [bitcask:get(Ref, make_kd(2, Bucket, <<"key-8">>))]),
+	Acc1 = [],
+	FoldKeysFun = fun(Bucket1, Key, Acc) -> [{Bucket1, Key} | Acc] end,
+	FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
+	{FoldResult, _Bucketset} =
+		bitcask:fold_keys(Ref, FoldFun, {Acc1, sets:new()}),
+	lager:info("Folding data, currently read: ~p~n", [FoldResult]),
+	case FoldResult of
+		{error, _} ->
+			FoldResult;
+		_ ->
+			{ok, FoldResult}
+	end.
+
+fold_keys_fun(FoldKeysFun, undefined) ->
+	fun(#bitcask_entry{key=BK}, Acc) ->
+		{Bucket, Key} = bk_to_tuple(BK),
+		FoldKeysFun(Bucket, Key, Acc)
+	end;
+fold_keys_fun(FoldKeysFun, Bucket) ->
+	fun(#bitcask_entry{key=BK}, Acc) ->
+		{B, Key} = bk_to_tuple(BK),
+		case B =:= Bucket of
+			true ->
+				FoldKeysFun(B, Key, Acc);
+			false ->
+				Acc
+		end
+	end.
+
+bk_to_tuple(<<?VERSION_2:7, HasType:1, Sz:16/integer,
+	TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+	case HasType of
+		0 ->
+			%% no type, first field is bucket
+			{TypeOrBucket, Rest};
+		1 ->
+			%% has a tyoe, extract bucket as well
+			<<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+			{{TypeOrBucket, Bucket}, Key}
+	end;
+bk_to_tuple(<<?VERSION_1:7, HasType:1, Sz:16/integer,
+	TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+	case HasType of
+		0 ->
+			%% no type, first field is bucket
+			{TypeOrBucket, Rest};
+		1 ->
+			%% has a tyoe, extract bucket as well
+			<<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+			{{TypeOrBucket, Bucket}, Key}
+	end;
+bk_to_tuple(<<131:8,_Rest/binary>> = BK) ->
+	binary_to_term(BK).
+
+make_kd(0, Bucket, Key) ->
+	term_to_binary({Bucket, Key});
+make_kd(1, {Type, Bucket}, Key) ->
+	TypeSz = size(Type),
+	BucketSz = size(Bucket),
+	<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary,
+		BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(1, Bucket, Key) ->
+	BucketSz = size(Bucket),
+	<<?VERSION_1:7, 0:1, BucketSz:16/integer,
+		Bucket/binary, Key/binary>>;
+make_kd(2, {Type, Bucket}, Key) ->
+	TypeSz = size(Type),
+	BucketSz = size(Bucket),
+	<<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+make_kd(2, Bucket, Key) ->
+	BucketSz = size(Bucket),
+	<<?VERSION_BYTE:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
 %% ===================================================================
 %% Internal functions
