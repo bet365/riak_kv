@@ -72,12 +72,14 @@
 -define(VERSION_0, 131).
 -define(VERSION_1, 1).
 -define(VERSION_2, 2).
+-define(VERSION_3, 3).
 
--define(CURRENT_VERSION, ?VERSION_2).
+-define(CURRENT_VERSION, ?VERSION_3).
 -define(ENCODE_DISK_KEY_FUN, fun encode_disk_key/2).
 -define(DECODE_DISK_KEY_FUN, fun decode_disk_key/1).
-
-
+-define(ENCODE_BITCASK_KEY,  fun make_bitcask_key/3).
+-define(DECODE_BITCASK_KEY,  fun make_riak_key/1).
+-define(FIND_SPLIT_FUN,      fun find_split/1).
 
 -record(state, {ref :: reference() | undefined,
                 data_dir :: string(),
@@ -120,7 +122,10 @@ start(Partition, Config0) ->
     KeyOpts =
         [
             {encode_disk_key_fun, ?ENCODE_DISK_KEY_FUN},
-            {decode_disk_key_fun, ?DECODE_DISK_KEY_FUN}
+            {decode_disk_key_fun, ?DECODE_DISK_KEY_FUN},
+            {encode_riak_key,     ?ENCODE_BITCASK_KEY},
+            {decode_riak_key,     ?DECODE_BITCASK_KEY},
+            {find_split_fun,      ?FIND_SPLIT_FUN}
         ],
     Config = BaseConfig ++ KeyOpts,
     KeyVsn = ?CURRENT_VERSION,
@@ -138,6 +143,7 @@ start(Partition, Config0) ->
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
+                    BitcaskOpts1 = [{find_split_fun, fun find_split/1}, {upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
                     case bitcask:open(BitcaskDir, BitcaskOpts) of
                         Ref when is_reference(Ref) ->
                             check_fcntl(),
@@ -147,7 +153,7 @@ start(Partition, Config0) ->
                             {ok, #state{ref=Ref,
                                         data_dir=DataDir,
                                         root=DataRoot,
-                                        opts=BitcaskOpts,
+                                        opts=BitcaskOpts1,
                                         partition=Partition,
                                         key_vsn=KeyVsn}};
                         {error, Reason1} ->
@@ -178,7 +184,8 @@ stop(#state{ref=Ref}) ->
                  {error, not_found, state()} |
                  {error, term(), state()}.
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
-    BitcaskKey = make_bitcask_key(KVers, Bucket, Key),
+    Split = get_split(Bucket, Key),
+    BitcaskKey = make_bitcask_key(KVers, {Bucket, Split}, Key),
     case bitcask:get(Ref, BitcaskKey) of
         {ok, Value} ->
             {ok, Value, State};
@@ -203,7 +210,8 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
                  {ok, state()} |
                  {error, term(), state()}.
 put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
+    Split = get_split(Bucket, PrimaryKey),
+    BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}],
     case bitcask:put(Ref, BitcaskKey, Val, Opts) of
         ok ->
@@ -216,7 +224,9 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=
                  {ok, state()} |
                  {error, term(), state()}.
 put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
+    Split = get_split(Bucket, PrimaryKey),
+    lager:info("getting split name for Bucket: ~p and key: ~p Split is: ~p~n", [Bucket, PrimaryKey, Split]),
+    BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     case bitcask:put(Ref, BitcaskKey, Val) of
         ok ->
             {ok, State};
@@ -227,6 +237,19 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State)
                 is_tuple(Reason) and
                     lists:member(element(2, Reason), ?TERMINAL_POSIX_ERRORS),
             {error, Reason, State}
+    end.
+
+get_split(Bucket, Key) ->
+    case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
+        undefined ->
+            case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Key, latin1)) of
+                undefined ->
+                    <<"default">>;
+                Split ->
+                    atom_to_binary(Split, latin1)
+            end;
+        Split ->
+            atom_to_binary(Split, latin1)
     end.
 
 %% @doc Delete an object from the bitcask backend
@@ -489,12 +512,35 @@ make_bitcask_key(2, {Type, Bucket}, Key) ->
 
 make_bitcask_key(2, Bucket, Key) ->
     BucketSz = size(Bucket),
-    <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
+    <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_bitcask_key(3, {Type, Bucket, Split}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    SplitSz = size(Split),
+    <<?VERSION_3:7, 1:1, SplitSz:16/integer, Split/binary, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_bitcask_key(3, {Bucket, Split}, Key) ->
+    SplitSz = size(Split),
+    BucketSz = size(Bucket),
+    <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
+
 
 
 
 
 %% Make the riak key from the bitcask key, based on the version number
+make_riak_key(<<?VERSION_3:7, HasType:1, SplitSz:16/integer, Split:SplitSz/bytes, Sz:16/integer,
+    TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {Split, TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {Split, {TypeOrBucket, Bucket}, Key}
+    end;
 make_riak_key(<<?VERSION_2:7, HasType:1, Sz:16/integer,
     TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
@@ -525,7 +571,7 @@ make_riak_key(<<?VERSION_0:8,_Rest/binary>> = BK) ->
 
 %% Take the bitcask key stored down to disk, and decode it to match the keydir stored in memory
 %% return the keyinfo record, to find additional information that was stored down in the encoding
-decode_disk_key(<<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/binary>>) ->
+decode_disk_key(<<Version:7, Type:1, TstampExpire:32/integer, Rest/binary>>) when Version =:= ?VERSION_3 orelse Version =:= ?VERSION_2 ->
     #keyinfo{
         key = <<?CURRENT_VERSION:7, Type:1, Rest/binary>>,
         tstamp_expire = TstampExpire
@@ -552,7 +598,7 @@ decode_disk_key(<<?VERSION_0:8,_Rest/bits>> = Key0) ->
 
 %% Take the bitcask key generated by make_bitask_key, and encode it with additional information to be stored down to
 %% disk, but not stored in the keydir.
-encode_disk_key(<<?VERSION_2:7, Type:1, Rest/bits>>, Opts) ->
+encode_disk_key(<<Version:7, Type:1, Rest/bits>>, Opts) when Version =:= ?VERSION_2 orelse Version =:= ?VERSION_3 ->
     TstampExpire = proplists:get_value(?TSTAMP_EXPIRE_KEY, Opts, ?DEFAULT_TSTAMP_EXPIRE),
     <<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/bits>>;
 
@@ -563,7 +609,34 @@ encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey.
 
 
+find_split(Key) ->
+    lager:info("Finding Key has been called for Key: ~p and decoded Key: ~p~n", [Key, make_riak_key(Key)]),
+    case make_riak_key(Key) of
+        {Split, {_Type, _Bucket}, _Key} ->
+            binary_to_atom(Split, latin1);
+        {Split, _Bucket, _Key} ->
+            binary_to_atom(Split, latin1);
+        {{_Type, Bucket}, _Key} ->
+            binary_to_atom(Bucket, latin1);
+        {Bucket, _Key} ->
+            binary_to_atom(Bucket, latin1);
+        _ ->
+            default
+    end.
 
+check_and_upgrade_key(default, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
+    KeyDirKey;
+check_and_upgrade_key(Split, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
+    case ?DECODE_BITCASK_KEY(KeyDirKey) of
+        {{Bucket, Type}, Key} ->
+            ?ENCODE_BITCASK_KEY(3, {Type, Bucket, atom_to_binary(Split, latin1)}, Key);
+        {Bucket, Key} ->
+            ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split, latin1)}, Key)
+    end;
+check_and_upgrade_key(_Split, <<?VERSION_3:7, _Rest/bitstring>> = KeyDirKey) ->
+    KeyDirKey;
+check_and_upgrade_key(_Split, KeyDirKey) ->
+    KeyDirKey.
 
 
 %% ===================================================================
@@ -629,13 +702,22 @@ fold_keys_fun(FoldKeysFun, undefined) ->
     end;
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-            {B, Key} = make_riak_key(BK),
-            case B =:= Bucket of
-                true ->
-                    FoldKeysFun(B, Key, Acc);
-                false ->
-                    Acc
-            end
+        case make_riak_key(BK) of
+            {_S, B, Key} ->
+                case B =:= Bucket of
+                    true ->
+                        FoldKeysFun(B, Key, Acc);
+                    false ->
+                        Acc
+                end;
+            {B, Key} ->
+                case B =:= Bucket of
+                    true ->
+                        FoldKeysFun(B, Key, Acc);
+                    false ->
+                        Acc
+                end
+        end
     end.
 
 %% @private
