@@ -245,11 +245,11 @@ get_split(Bucket, Key) ->
             case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Key, latin1)) of
                 undefined ->
                     <<"default">>;
-                Split ->
-                    atom_to_binary(Split, latin1)
+                _Split ->
+                    Key
             end;
-        Split ->
-            atom_to_binary(Split, latin1)
+        _Split ->
+            Bucket
     end.
 
 %% @doc Delete an object from the bitcask backend
