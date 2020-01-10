@@ -28,6 +28,7 @@
          capabilities/1,
          capabilities/2,
          start/2,
+         start_additional_split/2,
          stop/1,
          get/3,
          put/5,
@@ -39,6 +40,7 @@
          fold_objects/4,
          is_empty/1,
          status/1,
+         check_backend_exists/2,
          callback/3]).
 
 -export([data_size/1,
@@ -168,6 +170,10 @@ start(Partition, Config0) ->
             end
     end.
 
+start_additional_split(Dir, #state{ref = Ref} = State) ->
+    NewRef = bitcask_manager:open(Ref, Dir, []),
+    {ok, State#state{ref = NewRef}}.
+
 %% @doc Stop the bitcask backend
 -spec stop(state()) -> ok.
 stop(#state{ref=Ref}) ->
@@ -183,10 +189,13 @@ stop(#state{ref=Ref}) ->
                  {ok, any(), state()} |
                  {error, not_found, state()} |
                  {error, term(), state()}.
-get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
+get(Bucket, Key, State) ->
+    Split = get_split(Bucket, Key),
+    get(Bucket, Key, State, [{split, binary_to_atom(Split, latin1)}]).
+get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
     Split = get_split(Bucket, Key),
     BitcaskKey = make_bitcask_key(KVers, {Bucket, Split}, Key),
-    case bitcask:get(Ref, BitcaskKey) of
+    case bitcask:get(Ref, BitcaskKey, Opts) of
         {ok, Value} ->
             {ok, Value, State};
         not_found  ->
@@ -212,7 +221,7 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     Split = get_split(Bucket, PrimaryKey),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
-    Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}],
+    Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}, {split, binary_to_atom(Split, latin1)}],
     case bitcask:put(Ref, BitcaskKey, Val, Opts) of
         ok ->
             {ok, State};
@@ -427,6 +436,10 @@ status(#state{ref=Ref}) ->
     {KeyCount, Status} = bitcask:status(Ref),
     [{key_count, KeyCount}, {status, Status}].
 
+check_backend_exists(_Split, #state{ref = _Ref}) ->
+%%    bitcask:check_backend_exist(Split, Ref).
+    ok.
+
 %% @doc Get the size of the bitcask backend (in number of keys)
 -spec data_size(state()) -> undefined | {non_neg_integer(), objects}.
 data_size(State) ->
@@ -600,7 +613,7 @@ decode_disk_key(<<?VERSION_0:8,_Rest/bits>> = Key0) ->
 %% disk, but not stored in the keydir.
 encode_disk_key(<<Version:7, Type:1, Rest/bits>>, Opts) when Version =:= ?VERSION_2 orelse Version =:= ?VERSION_3 ->
     TstampExpire = proplists:get_value(?TSTAMP_EXPIRE_KEY, Opts, ?DEFAULT_TSTAMP_EXPIRE),
-    <<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/bits>>;
+    <<Version:7, Type:1, TstampExpire:32/integer, Rest/bits>>;
 
 encode_disk_key(<<?VERSION_1:7, _Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey;

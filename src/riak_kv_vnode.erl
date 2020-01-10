@@ -46,6 +46,7 @@
          repair/1,
          repair_status/1,
          repair_filter/1,
+         update_metadata/2,
          hashtree_pid/1,
          rehash/3,
          refresh_index_data/4,
@@ -658,6 +659,13 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
+update_metadata({Name, Type}, Partition) ->
+    lager:info("Event propogated to the vnode"),
+    riak_core_vnode_master:sync_command({Partition, node()},
+        {update_metadata, Partition, {Name, Type}, node()},
+        riak_kv_vnode_master,
+        infinity).
+
 -spec hashtree_pid(index()) -> {ok, pid()} | {error, wrong_node}.
 hashtree_pid(Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
@@ -728,6 +736,10 @@ init([Index]) ->
     DeleteMode = app_helper:get_env(riak_kv, delete_mode, 3000),
     AsyncFolding = app_helper:get_env(riak_kv, async_folds, true) == true,
     MDCacheSize = app_helper:get_env(riak_kv, vnode_md_cache_size),
+
+    CallbackFun = fun(Key) -> riak_kv_vnode:update_metadata(Key, Index) end,
+    riak_core_metadata_events:add_sup_callback(CallbackFun),
+
     MDCache =
         case MDCacheSize of
             N when is_integer(N),
@@ -923,6 +935,26 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
                           FoldFun({Bucket, Key}, Value, Acc)
                   end,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
+
+handle_command({update_metadata, Partition, {{Key, _Type}, Metadata}, _Node}, _, State = #state{modstate = ModState}) ->
+    case riak_core_metadata_object:value(Metadata) of
+        '$deleted' ->
+%%            {ok, NewModState} = riak_kv_split_backend:drop_backend(atom_to_binary(Key, latin1), ModState),
+%%            NewState = State#state{modstate = NewModState},
+%%            {reply, ok, NewState};
+            ok;
+        _ ->
+            case riak_kv_bitcask_backend:check_backend_exists(atom_to_binary(Key, latin1), ModState) of
+                false ->
+                    %% TODO Need to sort out the new api needed for bitcask backend to talk to bitcask using new maneger module
+                    {ok, NewModState} = riak_kv_bitcask_backend:start_additional_split(Key, ModState),
+                    NewState = State#state{modstate = NewModState},
+                    {reply, ok, NewState};
+                true ->
+                    lager:debug("Vnode attempted to start new split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Key}, ModState]),
+                    {reply, ok, State}
+            end
+    end;
 
 %% entropy exchange commands
 handle_command({hashtree_pid, Node}, _, State=#state{hashtrees=HT}) ->
