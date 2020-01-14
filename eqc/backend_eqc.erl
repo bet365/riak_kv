@@ -29,12 +29,12 @@
 -include_lib("eunit/include/eunit.hrl").
 
 %% Public API
--compile(export_all).
 -export([test/1,
          test/2,
          test/3,
          test/4,
          test/5,
+         test_with_options/2,
          property/1,
          property/2,
          property/3,
@@ -50,7 +50,7 @@
          postcondition/5]).
 
 %% eqc property
--export([prop_backend/4]).
+-export([prop_backend/1, prop_backend/2, prop_backend/3, prop_backend/4]).
 
 %% States
 -export([stopped/1,
@@ -59,6 +59,7 @@
 %% Helpers
 -export([drop/2,
          delete/5,
+         async_put/5,
          init_backend/3]).
 
 -define(TEST_SECONDS, 120).
@@ -72,8 +73,11 @@
                i=ordsets:new()}). % List of indexes
 
 %% ====================================================================
-%% Public API
+%% eqc property
 %% ====================================================================
+
+prop_backend(Backend) ->
+    prop_backend(Backend, false).
 
 test(Backend) ->
     test2(property(Backend, false)).
@@ -83,7 +87,7 @@ test(Backend, Volatile) ->
 
 test(Backend, Volatile, Config) ->
     test2(property(Backend, Volatile, Config,
-                   fun(BeState,_Olds) -> catch(Backend:stop(BeState)) end)).
+                   cleanup_fun(Backend))).
 
 test(Backend, Volatile, Config, Cleanup) ->
     test2(property(Backend, Volatile, Config, Cleanup, ?TEST_SECONDS)).
@@ -91,8 +95,16 @@ test(Backend, Volatile, Config, Cleanup) ->
 test(Backend, Volatile, Config, Cleanup, NumTests) ->
     test2(property(Backend, Volatile, Config, Cleanup, NumTests)).
 
-test2(Prop) ->
-    eqc:quickcheck(Prop).
+check(Backend) ->
+    check2(property(Backend, false)).
+
+test_with_options(Backend, Ops) when is_list(Ops) ->
+    Volatile = proplists:get_value(volatile, Ops, false),
+    Config = proplists:get_value(config, Ops, []),
+    Cleanup = proplists:get_value(cleanup_fun, Ops, cleanup_fun(Backend)),
+    TestingTime = proplists:get_value(testing_time, Ops, ?TEST_SECONDS),
+    test2(property(Backend, Volatile, Config, Cleanup, TestingTime)).
+
 
 property(Backend) ->
     property(Backend, false).
@@ -111,9 +123,22 @@ property(Backend, Volatile, Config, Cleanup, NumSeconds) ->
     eqc:testing_time(NumSeconds,
                      prop_backend(Backend, Volatile, Config, Cleanup)).
 
-%% ====================================================================
-%% eqc property
-%% ====================================================================
+
+cleanup_fun(Backend) ->
+    fun(BeState,_Olds) -> catch(Backend:stop(BeState)) end.
+
+check2(Prop) ->
+    eqc:check(Prop).
+
+test2(Prop) ->
+    eqc:quickcheck(Prop).
+
+prop_backend(Backend, Volatile) ->
+    prop_backend(Backend, Volatile, []).
+
+prop_backend(Backend, Volatile, Config) ->
+    prop_backend(Backend, Volatile, Config, fun(BeState,_Olds) ->
+                                            catch(Backend:stop(BeState)) end).
 
 prop_backend(Backend, Volatile, Config, Cleanup) ->
     ?FORALL(Cmds,
@@ -173,7 +198,7 @@ val() ->
     %% differ since at this point in the processing
     %% pipeline the information has already been
     %% extracted.
-    term_to_binary(riak_object:new(<<"b1">>, <<"k1">>, <<"v1">>)).
+    riak_object:to_binary(v1, riak_object:new(<<"b1">>, <<"k1">>, <<"v1">>)).
 
 g_opts() ->
     frequency([{5, [async_fold]}, {2, []}]).
@@ -257,7 +282,7 @@ fold_objects_fun() ->
     end.
 
 get_partition() ->
-    {MegaSecs, Secs, MicroSecs} = erlang:now(),
+    {MegaSecs, Secs, MicroSecs} = os:timestamp(),
     Partition = integer_to_list(MegaSecs) ++
         integer_to_list(Secs) ++
         integer_to_list(MicroSecs),
@@ -285,7 +310,13 @@ init_backend(Backend, _Volatile, Config) ->
         undefined ->
             ok;
         OldPoolPid ->
-            riak_core_vnode_worker_pool:stop(OldPoolPid, normal)
+            %try riak_core_vnode_worker_pool:stop(OldPoolPid, normal) of
+                %_ -> ok
+            %catch
+                %_:_ ->
+                    unlink(OldPoolPid),
+                    exit(OldPoolPid, kill)
+            %end
     end,
     %% Store the info about the worker pool
     erlang:put(worker_pool, PoolPid),
@@ -454,6 +485,13 @@ running(#qcst{backend=Backend,
      {stopped, {call, ?MODULE, drop, [Backend, State]}},
      {stopped, {call, Backend, stop, [State]}}
     ].
+
+fold_keys(FoldKeysFun, FoldBuffer, {index, Bucket, Query}, Backend, State) ->
+    UpQuery = riak_index:upgrade_query(Query),
+    Backend:fold_keys(FoldKeysFun, FoldBuffer, {index, Bucket, UpQuery}, State);
+fold_keys(FoldKeysFun, FoldBuffer, Q, Backend, State) ->
+    Backend:fold_keys(FoldKeysFun, FoldBuffer, Q, State).
+
 
 dynamic_precondition(_From,_To,#qcst{backend=Backend},{call, _M, fold_keys, [_FoldFun, _Acc, [{index, Bucket, _}], BeState]}) ->
     {ok, Capabilities} = Backend:capabilities(Bucket, BeState),

@@ -78,6 +78,13 @@
          mark_indexes_fixed/2,
          fixed_index_status/1]).
 
+-export([head/3]).
+
+-ifdef(EQC).
+-include_lib("eqc/include/eqc.hrl").
+-export([prop_multi_backend_sample/0, prop_multi_backend_async_fold/0]).
+-endif.
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
@@ -124,11 +131,15 @@ capabilities(State) ->
 
 %% @doc Return the capabilities of the backend.
 -spec capabilities(riak_object:bucket(), state()) -> {ok, [atom()]}.
-capabilities(Bucket, State) when is_binary(Bucket) ->
-    {_Name, Mod, ModState} = get_backend(Bucket, State),
-    Mod:capabilities(ModState);
-capabilities(_Bucket, State) ->
-    capabilities(State).
+capabilities(Bucket, State) ->
+    case Bucket of
+        B when is_binary(B) ->
+            fetch_bucket_capability(Bucket, State);
+        {T, B} when is_binary(T), is_binary(B) ->
+            fetch_bucket_capability(Bucket, State);
+        _ ->
+            capabilities(State)
+    end.
 
 %% @doc Start the backends
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
@@ -219,6 +230,22 @@ stop(#state{backends=Backends}) ->
 get(Bucket, Key, State) ->
     {Name, Module, SubState} = get_backend(Bucket, State),
     case Module:get(Bucket, Key, SubState) of
+        {ok, Value, NewSubState} ->
+            NewState = update_backend_state(Name, Module, NewSubState, State),
+            {ok, Value, NewState};
+        {error, Reason, NewSubState} ->
+            NewState = update_backend_state(Name, Module, NewSubState, State),
+            {error, Reason, NewState}
+    end.
+
+%% @doc Retrieve an object from the leveled backend as a binary
+-spec head(riak_object:bucket(), riak_object:key(), state()) ->
+                 {ok, any(), state()} |
+                 {ok, not_found, state()} |
+                 {error, term(), state()}.
+head(Bucket, Key, State) ->
+    {Name, Module, SubState} = get_backend(Bucket, State),
+    case Module:head(Bucket, Key, SubState) of
         {ok, Value, NewSubState} ->
             NewState = update_backend_state(Name, Module, NewSubState, State),
             {ok, Value, NewState};
@@ -459,6 +486,14 @@ fixed_index_status(Mod, ModState, Status) ->
 %% ===================================================================
 
 %% @private
+%% Fetch the capabilities of a backend assocaited with a bucket
+-spec fetch_bucket_capability(riak_object:bucket(), state()) -> {ok, [atom()]}.
+fetch_bucket_capability(Bucket, State) ->
+    {_Name, Mod, ModState} = get_backend(Bucket, State),
+    Mod:capabilities(ModState).
+
+
+%% @private
 %% Given a Bucket name and the State, return the
 %% backend definition. (ie: {Name, Module, SubState})
 get_backend(Bucket, #state{backends=Backends,
@@ -629,6 +664,7 @@ backend_can_index_reformat(Mod, ModState) ->
 -ifdef(TEST).
 
 multi_backend_test_() ->
+    BPath = riak_kv_test_util:get_test_dir("bitcask-backend"),
     {foreach,
      fun() ->
              crypto:start(),
@@ -641,14 +677,14 @@ multi_backend_test_() ->
 
              %% Have to do some prep for bitcask
              application:load(bitcask),
-             ?assertCmd("rm -rf test/bitcask-backend"),
-             application:set_env(bitcask, data_root, "test/bitcask-backend"),
+             ?assertCmd("rm -rf " ++ BPath ++ "/*"),
+             application:set_env(bitcask, data_root, BPath),
 
              [P1, P2]
      end,
      fun([P1, P2]) ->
              crypto:stop(),
-             ?assertCmd("rm -rf test/bitcask-backend"),
+             ?assertCmd("rm -rf " ++ BPath ++ "/*"),
              unlink(P1),
              unlink(P2),
              catch exit(P1, kill),
@@ -733,21 +769,22 @@ multi_backend_test_() ->
 
 -ifdef(EQC).
 
-eqc_test_() ->
-    {spawn,
-     [{inorder,
-       [{setup,
-         fun setup/0,
-         fun cleanup/1,
-         [{timeout, 60000, [?_assertEqual(true,
-                        backend_eqc:test(?MODULE, true, sample_config()))]},
-          {timeout, 60000, [?_assertEqual(true,
-                        backend_eqc:test(?MODULE, true, async_fold_config()))]}
-         ]}]}]}.
+prop_multi_backend_sample() ->
+    ?SETUP(fun setup/0,
+           backend_eqc:prop_backend(?MODULE, true, sample_config())).
+
+prop_multi_backend_async_fold() ->
+    ?SETUP(fun setup/0,
+           backend_eqc:prop_backend(?MODULE, true, async_fold_config())).
 
 setup() ->
     %% Start the ring manager...
     crypto:start(),
+    CDPath = riak_kv_test_util:get_test_dir("core/data"),
+    CLPath = riak_kv_test_util:get_test_dir("core/log"),
+    application:set_env(riak_core, platform_data_dir, CDPath),
+    application:set_env(riak_core, platform_log_dir, CLPath),
+    error_logger:tty(false),
     {ok, P1} = riak_core_ring_events:start_link(),
     {ok, P2} = riak_core_ring_manager:start_link(test),
 
@@ -757,18 +794,17 @@ setup() ->
     riak_core_bucket:set_bucket(<<"b1">>, [{backend, first_backend}]),
     riak_core_bucket:set_bucket(<<"b2">>, [{backend, second_backend}]),
 
-    {P1, P2}.
+    fun() ->
+            crypto:stop(),
+            application:stop(riak_core),
 
-cleanup({P1, P2}) ->
-    crypto:stop(),
-    application:stop(riak_core),
-
-    unlink(P1),
-    unlink(P2),
-    catch exit(P1, kill),
-    catch exit(P2, kill),
-    wait_until_dead(P1),
-    wait_until_dead(P2).
+            unlink(P1),
+            unlink(P2),
+            catch exit(P1, kill),
+            catch exit(P2, kill),
+            wait_until_dead(P1),
+            wait_until_dead(P2)
+    end.
 
 async_fold_config() ->
     [
@@ -785,14 +821,17 @@ async_fold_config() ->
 %% Check extra callback messages are ignored by backends
 extra_callback_test() ->
     %% Have to do some prep for bitcask
+    BPath = riak_kv_test_util:get_test_dir("bitcask-backend"),
+    EPath = riak_kv_test_util:get_test_dir("eleveldb-backend"),
+
     application:load(bitcask),
-    ?assertCmd("rm -rf test/bitcask-backend"),
-    application:set_env(bitcask, data_root, "test/bitcask-backend"),
+    ?assertCmd("rm -rf " ++ BPath ++ "/*"),
+    application:set_env(bitcask, data_root, BPath),
 
     %% Have to do some prep for eleveldb
     application:load(eleveldb),
-    ?assertCmd("rm -rf test/eleveldb-backend"),
-    application:set_env(eleveldb, data_root, "test/eleveldb-backend"),
+    ?assertCmd("rm -rf " ++ EPath ++ "/*"),
+    application:set_env(eleveldb, data_root, EPath),
 
     %% Start up multi backend
     Config = [{storage_backend, riak_kv_multi_backend},

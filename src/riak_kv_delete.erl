@@ -61,7 +61,8 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
         {R, PR, PassThruOpts} ->
             RealStartTime = riak_core_util:moment(),
             {ok, C} = riak:local_client(),
-            case C:get(Bucket,Key,[{r,R},{pr,PR},{timeout,Timeout}]++PassThruOpts) of
+            GetOpts = [{r,R}, {pr,PR}, {timeout,Timeout}] ++ PassThruOpts,
+            case riak_client:get(Bucket, Key, GetOpts, C) of
                 {ok, OrigObj} ->
                     RemainingTime = Timeout - (riak_core_util:moment() - RealStartTime),
                     delete(ReqId,Bucket,Key,Options,RemainingTime,Client,ClientId,riak_object:vclock(OrigObj));
@@ -83,8 +84,9 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             Client ! {ReqId, {error, Reason}};
         {W, PW, DW, PassThruOptions} ->
             Tombstone = create_tombstone(VClock, Bucket, Key, BackendReapMode),
-            {ok,C} = riak:local_client(ClientId),
-            Reply = C:put(Tombstone, [{w,W},{pw,PW},{dw, DW},{timeout,Timeout}]++PassThruOptions),
+            {ok, C} = riak:local_client(ClientId),
+            PutOpts = [{w,W}, {pw,PW}, {dw, DW}, {timeout,Timeout}] ++ PassThruOptions,
+            Reply = riak_client:put(Tombstone, PutOpts, C),
             Client ! {ReqId, Reply},
             maybe_reap(Bucket, Key, Reply, Options, BackendReapMode)
     end.
@@ -239,7 +241,7 @@ delete_test_() ->
 invalid_rw_delete() ->
     RW = <<"abc">>,
     %% Start the gen_fsm process
-    RequestId = erlang:phash2(erlang:now()),
+    RequestId = erlang:phash2(os:timestamp()),
     Bucket = <<"testbucket">>,
     Key = <<"testkey">>,
     Timeout = 60000,
@@ -256,7 +258,7 @@ invalid_rw_delete() ->
 invalid_r_delete() ->
     R = <<"abc">>,
     %% Start the gen_fsm process
-    RequestId = erlang:phash2(erlang:now()),
+    RequestId = erlang:phash2(os:timestamp()),
     Bucket = <<"testbucket">>,
     Key = <<"testkey">>,
     Timeout = 60000,
@@ -273,7 +275,7 @@ invalid_r_delete() ->
 invalid_w_delete() ->
     W = <<"abc">>,
     %% Start the gen_fsm process
-    RequestId = erlang:phash2(erlang:now()),
+    RequestId = erlang:phash2(os:timestamp()),
     Bucket = <<"testbucket">>,
     Key = <<"testkey">>,
     Timeout = 60000,
@@ -291,7 +293,7 @@ invalid_w_delete() ->
 invalid_pr_delete() ->
     PR = <<"abc">>,
     %% Start the gen_fsm process
-    RequestId = erlang:phash2(erlang:now()),
+    RequestId = erlang:phash2(os:timestamp()),
     Bucket = <<"testbucket">>,
     Key = <<"testkey">>,
     Timeout = 60000,
@@ -308,7 +310,7 @@ invalid_pr_delete() ->
 invalid_pw_delete() ->
     PW = <<"abc">>,
     %% Start the gen_fsm process
-    RequestId = erlang:phash2(erlang:now()),
+    RequestId = erlang:phash2(os:timestamp()),
     Bucket = <<"testbucket">>,
     Key = <<"testkey">>,
     Timeout = 60000,

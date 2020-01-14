@@ -34,7 +34,8 @@
          common_setup/1,
          common_setup/2,
          common_cleanup/1,
-         common_cleanup/2]).
+         common_cleanup/2,
+         get_test_dir/1]).
 
 -include_lib("eunit/include/eunit.hrl").
 
@@ -200,7 +201,7 @@ setup(TestName, SetupFun) ->
 -spec cleanup(Test::string(), CleanupFun::fun((stop) -> any()), SetupResult::setup | atom()) -> ok.
 cleanup(Test, CleanupFun, setup) ->
     %% Remove existing ring files so we have a fresh ring
-    os:cmd("rm -rf " ++ Test ++ "/ring"),
+    os:cmd("rm -rf " ++ get_test_dir(Test) ++ "/ring"),
     cleanup(Test, CleanupFun, []);
 cleanup(Test, CleanupFun, StartedApps) ->
     Deps = lists:reverse(dep_apps(Test, CleanupFun)),
@@ -223,6 +224,9 @@ cleanup(Test, CleanupFun, StartedApps) ->
     wait_for_unregister(riak_kv_stat),
     %% Stop distributed Erlang
     net_kernel:stop(),
+
+    {ok, Hostname} = inet:gethostname(),
+    os:cmd("rm -rf *@" ++ Hostname),
 
     %% Reset the riak_core vnode_modules
     application:set_env(riak_core, vnode_modules, []),
@@ -250,8 +254,9 @@ dep_apps(Test, Extra) ->
     Silencer = fun(load) ->
                        %% Silence logging junk
                        application:set_env(kernel, error_logger, silent),
-                       filelib:ensure_dir(Test ++ "/log/sasl.log"),
-                       application:set_env(sasl, sasl_error_logger, {file, Test++"/log/sasl.log"}),
+                       filelib:ensure_dir(get_test_dir(Test) ++ "/log/sasl.log"),
+                       application:set_env(sasl, sasl_error_logger,
+                                            {file, get_test_dir(Test) ++ "/log/sasl.log"}),
                        error_logger:tty(false);
                   (_) -> ok
                end,
@@ -260,9 +265,16 @@ dep_apps(Test, Extra) ->
                 %% Set some missing env vars that are normally part of
                 %% release packaging. These can be overridden by the
                 %% Extra fun.
+                application:set_env(riak_ensemble,
+                                    data_root,
+                                    get_test_dir(Test) ++ "ensemble"),
                 application:set_env(riak_core, ring_creation_size, 64),
-                application:set_env(riak_core, ring_state_dir, Test ++ "/ring"),
-                application:set_env(riak_core, platform_data_dir, Test ++ "/data"),
+                application:set_env(riak_core,
+                                    ring_state_dir,
+                                    get_test_dir(Test) ++ "/ring"),
+                application:set_env(riak_core,
+                                    platform_data_dir,
+                                    get_test_dir(Test) ++ "/data"),
                 application:set_env(riak_core, handoff_port, 0), %% pick a random handoff port
                 %% @TODO this is wrong still as the deps dirs is a
                 %% best guest in `get_deps_dir/0'
@@ -271,14 +283,21 @@ dep_apps(Test, Extra) ->
                 application:set_env(riak_core, schema_dirs, Dirs),
                 application:set_env(lager, handlers, [{lager_file_backend,
                                                        [
-                                                        {Test ++ "/log/debug.log", debug, 10485760, "$D0", 5}]}]),
-                application:set_env(lager, crash_log, Test ++ "/log/crash.log");
+                                                        {get_test_dir(Test)
+                                                            ++ "/log/debug.log",
+                                                        debug,
+                                                        10485760,
+                                                        "$D0",
+                                                        5}]}]),
+                application:set_env(lager,
+                                    crash_log,
+                                    get_test_dir(Test) ++ "/log/crash.log");
            (stop) -> ok;
            (_) -> ok
         end,
 
-    [sasl, Silencer, goldrush, lager, exometer_core, runtime_tools, erlang_js,
-     mochiweb, webmachine, sidejob, poolboy, basho_stats, bitcask, protobuffs,
+    [sasl, Silencer, goldrush, lager, folsom, exometer_core, runtime_tools,
+     mochiweb, webmachine, sidejob, poolboy, basho_stats, bitcask,
      eleveldb, riak_core, riak_pipe, riak_api, riak_dt, riak_pb, riak_kv,
      DefaultSetupFun, Extra].
 
@@ -329,6 +348,7 @@ start_app_and_deps(Application, Started) ->
         true ->
             {ok, Started};
         false ->
+            _Apps = application:which_applications(),
             case application:start(Application) of
                 ok ->
                     {ok, [Application|Started]};
@@ -347,6 +367,20 @@ start_app_and_deps(Application, Started) ->
             end
     end.
 
+get_test_dir(TestName) ->
+    % This used to be TestName prior to OTP20/rebar3
+    % Now add special case for existence of _build and running as rebar test
+    case filelib:is_dir("_build") of
+        true ->
+            Rebar3TestFolder = "_build/test/" ++ TestName,
+            ok = filelib:ensure_dir(Rebar3TestFolder),
+            Rebar3TestFolder;
+        false ->
+            {ok, CWD} = file:get_cwd(),
+            io:format(user, "_build not available at ~s~n", [CWD]),
+            TestName
+    end.
+
 get_deps_dir() ->
     case os:getenv("REBAR_DEPS_DIR") of
         false ->
@@ -360,13 +394,19 @@ guess_deps_dir() ->
     case filename:rootname(CWD) == CWD of
         true ->
             %% not in .eunit, must be running from console
-            case filelib:is_dir("deps") of
+            case filelib:is_dir("_build/default/lib") of
                 true ->
-                    %% probably a root checkout
-                    "deps/";
+                    %% running as rebar3 from console
+                    "_build/default/lib/";
                 false ->
-                    %% probably part of an applications deps
-                    "../"
+                    case filelib:is_dir("deps") of
+                        true ->
+                            %% probably a root checkout
+                            "deps/";
+                        false ->
+                            %% probably part of an applications deps
+                            "../"
+                    end
             end;
         false ->
             %% probably running in .eunit

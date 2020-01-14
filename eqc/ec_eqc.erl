@@ -4,8 +4,9 @@
 
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include("../src/stacktrace.hrl").
 
--compile([export_all]).
+-compile([export_all, nowarn_export_all]).
 
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
@@ -27,7 +28,7 @@ eqc_test_() ->
              meck:unload(riak_core_bucket)
      end,
      [
-      {timeout, 300000, ?_assertEqual(true, quickcheck(numtests(1000, ?QC_OUT(prop()))))}
+      {timeout, 300000, ?_assertEqual(true, quickcheck(numtests(1000, ?QC_OUT(prop_ec()))))}
      ]}.
 
 %% TODO: 
@@ -53,10 +54,10 @@ test() ->
     teardown().
 
 test(N) ->
-    quickcheck(numtests(N, prop())).
+    quickcheck(numtests(N, prop_ec())).
 
 check() ->
-    check(prop(), current_counterexample()).
+    check(prop_ec(), current_counterexample()).
 
 -define(B, <<"b">>).
 -define(K, <<"k">>).
@@ -147,41 +148,51 @@ gen_client_seeds() ->
 gen_dvv_enabled() ->
     bool().
 
-prop() ->
-    ?FORALL({Pris, ClientSeeds, ParamsSeed, DVVEnabled},
-            {gen_pris(), gen_client_seeds(),gen_params(), gen_dvv_enabled()},
-            begin
-                application:set_env(riak_kv, dvv_enabled, DVVEnabled),
-                %% io:format(user, "Pris: ~p\n", [Pris]),
-                set_pri(Pris),
-                Params = make_params(ParamsSeed),
-                                                %NodeProcs = make_nodes(Q),
-                VnodeProcs = make_vnodes(Params),
-                Initial = #state{params = Params, 
-                                 procs = VnodeProcs},
-                Clients = make_clients(ClientSeeds, Params),
-                Start = Initial#state{clients = Clients},
-                %% io:format(user, "=== Start ===\nParams:\n~p\nClientSeeds\n~p\nState: ~p\n",
-                %%           [ann_params(Params), ClientSeeds, Start]),
-                case exec(Start) of
-                    {ok, Final} ->
-                        ?WHENFAIL(
-                           begin
-                               io:format(user, "Params:\n~p\nClients:\n~p\nFinal:\n~p\nHistory\n",
-                                         [ann_params(Params),
-                                          Clients,
-                                          Final]),
-                               pretty_history(Final#state.history)
-                           end,
-                           check_final(Final));
-                    {What, Reason, Next, FailS} ->
-                        io:format(user, "FAILED: ~p: ~p\nParams:\n~p\nNext: ~p\nStart:\n~p\n"
-                                  "FailS:\n~p\n",
-                                  [What, Reason, ann_params(Params), Next,
-                                   ann_state(Start), ann_state(FailS)]),
-                        false
-                end
-            end).
+prop_ec() ->
+    ?SETUP(fun() ->
+                   meck:new(riak_core_bucket),
+                   meck:expect(riak_core_bucket, get_bucket,
+                               fun(_Bucket) ->
+                                       [dvv_enabled]
+                               end),
+                   fun() ->
+                           meck:unload(riak_core_bucket)
+                   end
+           end,
+           ?FORALL({Pris, ClientSeeds, ParamsSeed, DVVEnabled},
+                   {gen_pris(), gen_client_seeds(),gen_params(), gen_dvv_enabled()},
+                   begin
+                       application:set_env(riak_kv, dvv_enabled, DVVEnabled),
+                       %% io:format(user, "Pris: ~p\n", [Pris]),
+                       set_pri(Pris),
+                       Params = make_params(ParamsSeed),
+                       %NodeProcs = make_nodes(Q),
+                       VnodeProcs = make_vnodes(Params),
+                       Initial = #state{params = Params, 
+                                        procs = VnodeProcs},
+                       Clients = make_clients(ClientSeeds, Params),
+                       Start = Initial#state{clients = Clients},
+                       %% io:format(user, "=== Start ===\nParams:\n~p\nClientSeeds\n~p\nState: ~p\n",
+                       %%           [ann_params(Params), ClientSeeds, Start]),
+                       case exec(Start) of
+                           {ok, Final} ->
+                               ?WHENFAIL(
+                                  begin
+                                      io:format(user, "Params:\n~p\nClients:\n~p\nFinal:\n~p\nHistory\n",
+                                                [ann_params(Params),
+                                                 Clients,
+                                                 Final]),
+                                      pretty_history(Final#state.history)
+                                  end,
+                                  check_final(Final));
+                           {What, Reason, Next, FailS} ->
+                               io:format(user, "FAILED: ~p: ~p\nParams:\n~p\nNext: ~p\nStart:\n~p\n"
+                                         "FailS:\n~p\n",
+                                         [What, Reason, ann_params(Params), Next,
+                                          ann_state(Start), ann_state(FailS)]),
+                               false
+                       end
+                   end)).
 
 check_final(#state{history = H}) ->
     %% Go through the history and check for the expected values
@@ -194,22 +205,22 @@ check_final(#state{history = H}) ->
 
 %% Todo, stop overloading Result
 
-check_final([{result, _, #req{op = {get, PL}}, Result}], Must, _May, _ClientView) ->
+check_final([{result, _, #req{op = {get, _PL}}, Result}], Must, _May, _ClientView) ->
     {Values, _VClock} = case Result of
                             {ok, Obj} ->
                                 {riak_object:get_values(Obj), riak_object:vclock(Obj)};
                             {error, _} ->
                                 {[], []}
                         end,
-    _Fallbacks = [{I,J} || {kv_vnode, I, J} <- PL, I /= J],
     ?FINALDBG("Final GOT VALUES: ~p VC: ~w Must: ~p May: ~p Fallbacks: ~w\n",
-              [Values, _VClock, Must, _May, _Fallbacks]),
+              [Values, _VClock, Must, _May,
+                [{I,J} || {kv_vnode, I, J} <- _PL, I /= J]]),
     ?WHENFAIL(io:format(user, "Must: ~p\nMay: ~p\nValues: ~p\n", [Must, _May, Values]),
               equals(Must -- Values, []));
 %% conjunction([{must_leftover, equals(Must -- Values, [])},
 %%              {must_may_leftover, equals(Values -- (Must ++ May), [])}]))
 
-check_final([{result, Cid, #req{op = {get, PL}}, Result} | Results],
+check_final([{result, Cid, #req{op = {get, _PL}}, Result} | Results],
             Must, May, ClientViews) ->
     %% TODO: Check if _Result matches expected values
     {ValuesAtGet, _VClockAtGet} = case Result of
@@ -218,17 +229,16 @@ check_final([{result, Cid, #req{op = {get, PL}}, Result} | Results],
                                       {error, _} ->
                                           {[], []}
                                   end,
-    _Fallbacks = [{I,J} || {kv_vnode, I, J} <- PL, I /= J],
     ?FINALDBG("Cid ~p GOT VALUES: ~p VC: ~w FALLBACKS: ~w\n",
-              [Cid, ValuesAtGet, _VClockAtGet, _Fallbacks]),
+              [Cid, ValuesAtGet, _VClockAtGet,
+                [{I,J} || {kv_vnode, I, J} <- _PL, I /= J]]),
     UpdClientViews = lists:keystore(Cid, 1, ClientViews, {Cid, ValuesAtGet}),
     check_final(Results, Must, May, UpdClientViews);
-check_final([{result, Cid, #req{rid = _ReqId, op = {put, PL, V}}, 
+check_final([{result, Cid, #req{rid = _ReqId, op = {put, _PL, V}}, 
               {Result, _PutObj, _UpdObj}} | Results],
             Must, May, ClientViews) ->
     {Cid, ValuesAtGet} = lists:keyfind(Cid, 1, ClientViews),
     ValNotInMay = not lists:member(V, May),
-    _Fallbacks = [{I,J} || {kv_vnode, I, J} <- PL, I /= J],
     UpdMust = case Result of
                   ok when ValNotInMay -> %, Fallbacks == [] ->
                       %% This put could have already been overwritten
@@ -249,7 +259,8 @@ check_final([{result, Cid, #req{rid = _ReqId, op = {put, PL, V}},
               end,
     UpdMay = lists:usort(May ++ ValuesAtGet),
     ?FINALDBG("Cid ~p PUT: ~p RESPONSE: ~p VC: ~w OVER ~p MUST: ~p MAY: ~p FALLBACKS: ~w\n",
-              [Cid, V, Result, riak_object:vclock(_PutObj), ValuesAtGet, UpdMust, UpdMay, _Fallbacks]),
+              [Cid, V, Result, riak_object:vclock(_PutObj), ValuesAtGet, UpdMust, UpdMay,
+                [{I,J} || {kv_vnode, I, J} <- _PL, I /= J]]),
     UpdClientViews = lists:keydelete(Cid, 1, ClientViews),
     check_final(Results, UpdMust, UpdMay, UpdClientViews);
 check_final([_ | Results], Must, May, ClientViews) ->
@@ -270,8 +281,8 @@ exec(S) ->
                 exec(inc_step(deliver_req(Cid, S)))
         end
     catch
-        What:Reason ->
-            {What, {Reason, erlang:get_stacktrace()}, Next, S}
+        ?_exception_(What, Reason, StackToken) ->
+            {What, {Reason, ?_get_stacktrace_(StackToken)}, Next, S}
     end.
 
 status(#state{verbose = true} = S, Next) ->

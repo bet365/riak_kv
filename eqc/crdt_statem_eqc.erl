@@ -22,14 +22,14 @@
 
 -module(crdt_statem_eqc).
 
--include("riak_kv_types.hrl").
+-include("include/riak_kv_types.hrl").
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 -record(state,{vnodes=[], mod_state, vnode_id=0, mod}).
 
@@ -79,10 +79,6 @@ postcondition(_S,{call, ?MODULE, crdt_equals, _},Res) ->
     Res == true;
 postcondition(_S,{call,_,_,_},_Res) ->
     true.
-
-prop_converge(InitialValue, NumTests, Mod) ->
-    eqc:quickcheck(eqc:numtests(NumTests, ?QC_OUT(prop_converge(InitialValue,
-                                                                Mod)))).
 
 prop_converge(InitialValue, ?HLL_TYPE=Mod) ->
     ?FORALL(Cmds,commands(?MODULE, #state{mod=Mod, mod_state=InitialValue}),

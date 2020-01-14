@@ -64,9 +64,14 @@
 
 -include("riak_kv_index.hrl").
 
+-ifdef(EQC).
+-include_lib("eqc/include/eqc.hrl").
+-export([prop_memory_backend/0]).
+-endif.
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--compile([export_all]).
+-compile([export_all, nowarn_export_all]).
 -endif.
 
 -define(API_VERSION, 1).
@@ -83,11 +88,11 @@
 
 -record(state, {data_ref :: ets:tid(),
                 index_ref :: ets:tid(),
-                time_ref :: ets:tid(),
+                time_ref :: ets:tid() | undefined,
                 max_memory :: undefined | integer(),
                 used_memory=0 :: integer(),
                 put_obj_size=0 :: integer(),
-                ttl :: integer()}).
+                ttl :: integer() | undefined}).
 
 -type state() :: #state{}.
 -type config() :: [].
@@ -830,7 +835,7 @@ ttl_ets_timeref_leak_get_after_expiry_test() ->
     {ok, State1} = put(Bucket, Key, [], Value, State),
     {ok, #state{time_ref=TimeRef} = State2} = put(Bucket, Key, [], Value, State1),
     ?assertEqual(1, get_time_ref_count(TimeRef)),
-    timer:sleep(timer:seconds(1)),
+    timer:sleep(timer:seconds(1) + 1),
     {error, not_found, _State3} = get(Bucket, Key, State2),
     ?assertEqual(0, get_time_ref_count(TimeRef)).
 
@@ -840,28 +845,16 @@ get_time_ref_count(TimeRef) ->
 
 -ifdef(EQC).
 
-eqc_test_() ->
-    {spawn,
-     [{inorder,
-       [{setup,
-         fun setup/0,
-         fun cleanup/1,
-         [
-          {timeout, 60000,
-           [?_assertEqual(true,
-                          backend_eqc:test(?MODULE, true))]}
-         ]}]}]}.
-
-setup() ->
-    application:load(sasl),
-    application:set_env(sasl, sasl_error_logger, {file, "riak_kv_memory_backend_eqc_sasl.log"}),
-    error_logger:tty(false),
-    error_logger:logfile({open, "riak_kv_memory_backend_eqc.log"}),
-    ok.
-
-cleanup(_) ->
-    ok.
-
+prop_memory_backend() ->
+    ?SETUP(fun() ->
+                Path = riak_kv_test_util:get_test_dir("memory-backend"),
+                application:load(sasl),
+                application:set_env(sasl, sasl_error_logger, {file, Path ++ "riak_kv_memory_backend_eqc_sasl.log"}),
+                error_logger:tty(false),
+                error_logger:logfile({open, Path ++ "riak_kv_memory_backend_eqc.log"}),
+                fun() ->  os:cmd("rm -rf " ++ Path ++ "/*") end
+           end,
+           backend_eqc:prop_backend(?MODULE, true)).
 -endif. % EQC
 
 -endif. % TEST

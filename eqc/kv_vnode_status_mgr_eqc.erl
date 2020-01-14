@@ -12,38 +12,11 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 -record(state,{}).
 
--define(NUMTESTS, 1000).
--define(QC_OUT(P),
-        eqc:on_output(fun(Str, Args) ->
-                              io:format(user, Str, Args) end, P)).
-
 -define(MAX_INT, ((1 bsl 32) -1)).
-
-%%====================================================================
-%% eunit test
-%%====================================================================
-
-eqc_test_() ->
-    {timeout, 40,
-     ?_assertEqual(true, eqc:quickcheck(eqc:testing_time(20,
-                                                         ?QC_OUT(prop_monotonic())
-                                                        )
-                                       )
-                  )}.
-
-run() ->
-    run(?NUMTESTS).
-
-run(Count) ->
-    eqc:quickcheck(eqc:numtests(Count, prop_monotonic())).
-
-check() ->
-    eqc:check(prop_monotonic()).
-
 
 %% @doc Returns the state in which each test case starts. (Unless a different
 %%      initial state is supplied explicitly to, e.g. commands/2.)
@@ -105,7 +78,8 @@ prop_monotonic() ->
             begin
                 ets:new(vnode_status, [named_table, set]),
                 ets:new(vnodeids, [named_table, set]),
-                {ok, Pid} = riak_kv_vnode_status_mgr:start_link(self(), 1, true),
+                TestPath = riak_kv_test_util:get_test_dir("status_mgr_eqc"),
+                {ok, Pid} = riak_kv_vnode_status_mgr:test_link(self(), 1, true, TestPath),
                 {ok, {ID, _Counter, _Lease}} = riak_kv_vnode_status_mgr:get_vnodeid_and_counter(Pid, 1),
                 true =  ets:insert(vnode_status, {status, 1, 1, Pid}),
                 true = ets:insert(vnodeids, {ID}),

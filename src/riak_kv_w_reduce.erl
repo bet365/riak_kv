@@ -31,7 +31,7 @@
 %% should be a function expecting two arguments: `Inputs :: list()'
 %% and `Arg'.  The fun should return a list as its result.  The
 %% function {@link reduce_compat/1} should be used to transform the
-%% usual MapReduce phase spec (`{modfun, ...}', `{jsanon, ...}', etc.)
+%% usual MapReduce phase spec (`{modfun, ...}', etc.)
 %% into the variety of function expected here.
 %%
 %% The default behavior is to apply the reduce function to the first
@@ -111,18 +111,16 @@
 -include_lib("riak_pipe/include/riak_pipe.hrl").
 -include_lib("riak_pipe/include/riak_pipe_log.hrl").
 
--include("riak_kv_js_pools.hrl").
 
--record(state, {acc :: list(),
-                inacc :: list(),
-                delay :: integer(),
-                delay_max :: integer(),
-                p :: riak_pipe_vnode:partition(),
+-record(state, {acc = [] :: list(),
+                inacc = [] :: list(),
+                delay :: integer() | undefined,
+                delay_max :: integer() | undefined,
+                p :: riak_pipe_vnode:partition() | undefined,
                 fd :: riak_pipe_fitting:details()}).
 -opaque state() :: #state{}.
 -export_type([state/0]).
 
--define(DEFAULT_JS_RESERVE_ATTEMPTS, 10).
 
 %% @doc Setup creates an empty list accumulator and
 %%      stashes away the `Partition' and `FittingDetails' for later.
@@ -227,15 +225,6 @@ validate_fun(Fun) ->
 %% @doc Compatibility wrapper for an old-school Riak MR reduce function,
 %%      which is an arity-2 function `fun(InputList, SpecificationArg)'.
 -spec reduce_compat(riak_kv_mrc_pipe:reduce_query_fun()) -> fun().
-reduce_compat({jsanon, {Bucket, Key}})
-  when is_binary(Bucket), is_binary(Key) ->
-    reduce_compat({qfun, js_runner({jsanon, stored_source(Bucket, Key)})});
-reduce_compat({jsanon, Source})
-  when is_binary(Source) ->
-    reduce_compat({qfun, js_runner({jsanon, Source})});
-reduce_compat({jsfun, Name})
-  when is_binary(Name) ->
-    reduce_compat({qfun, js_runner({jsfun, Name})});
 reduce_compat({strfun, {Bucket, Key}})
   when is_binary(Bucket), is_binary(Key) ->
     reduce_compat({strfun, stored_source(Bucket, Key)});
@@ -260,42 +249,8 @@ no_input_run_reduce_once() ->
 -spec stored_source(binary(), binary()) -> binary().
 stored_source(Bucket, Key) ->
     {ok, C} = riak:local_client(),
-    {ok, Object} = C:get(Bucket, Key, 1),
+    {ok, Object} = riak_client:get(Bucket, Key, 1, C),
     riak_object:get_value(Object).
-
-%% @doc Produce a function suitable for this fitting's `Arg' that will
-%% evaluate the given piece of Javascript.
--spec js_runner({jsanon | jsfun, binary()}) ->
-         fun( (list(), term()) -> list() ).
-js_runner(JS) ->
-    fun(Inputs, Arg) ->
-            SafeArg = remove_batch_props(Arg),
-            JSInputs = [riak_kv_mapred_json:jsonify_not_found(I)
-                        || I <- Inputs],
-            JSCall = {JS, [JSInputs, SafeArg]},
-            case riak_kv_js_manager:blocking_dispatch(
-                   ?JSPOOL_REDUCE, JSCall, ?DEFAULT_JS_RESERVE_ATTEMPTS) of
-                {ok, Results0} when is_list(Results0) ->
-                    [riak_kv_mapred_json:dejsonify_not_found(R)
-                     || R <- Results0];
-                {ok, NonlistResults} ->
-                    NonlistResults; %% will blow up in reduce/3
-                {error, Error} ->
-                    exit(Error)
-            end
-    end.
-
-%% @doc Remove reduce batch size knobs from the `Arg' list, so
-%% mochijson2 doesn't blow up when trying to encode them.
-remove_batch_props(Arg) when is_list(Arg) ->
-    lists:filter(fun(reduce_phase_only_1)         -> false;
-                    ({reduce_phase_only_1,_})     -> false;
-                    ({reduce_phase_batch_size,_}) -> false;
-                    (_)                           -> true
-                 end,
-                 Arg);
-remove_batch_props(Arg) ->
-    Arg.
 
 %% @doc Determine what batch size should be used for this fitting.
 %% Default is 20, but may be overridden by the `Arg' props

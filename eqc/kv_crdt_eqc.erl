@@ -25,10 +25,10 @@
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eunit/include/eunit.hrl").
--include_lib("riak_kv_types.hrl").
--include("../src/riak_kv_wm_raw.hrl").
+-include("include/riak_kv_types.hrl").
+-include("src/riak_kv_wm_raw.hrl").
 
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 
 -define(TAG, 69).
 -define(V1_VERS, 1).
@@ -39,44 +39,6 @@
 -define(QC_OUT(P),
         eqc:on_output(fun(Str, Args) ->
                               io:format(user, Str, Args) end, P)).
-
-%%====================================================================
-%% eunit test
-%%====================================================================
-
-counter_value_test_() ->
-    {timeout, 60000, % do not trust the docs - timeout is in msec
-      ?_assertEqual(true, quickcheck(numtests(?NUMTESTS, ?QC_OUT(prop_value()))))}.
-
-counter_merge_test_() ->
-    {timeout, 60000, % do not trust the docs - timeout is in msec
-       ?_assertEqual(true, quickcheck(numtests(?NUMTESTS, ?QC_OUT(prop_merge()))))}.
-
-counter_update_test_() ->
-    {timeout, 60000, % do not trust the docs - timeout is in msec
-       ?_assertEqual(true, quickcheck(numtests(?NUMTESTS, ?QC_OUT(prop_update()))))}.
-
-%%====================================================================
-%% Shell helpers
-%%====================================================================
-
-test() ->
-    test(100).
-
-test(N) ->
-    quickcheck(numtests(N, prop_value())).
-
-test_merge() ->
-    test_merge(100).
-
-test_merge(N) ->
-    quickcheck(numtests(N, prop_merge())).
-
-test_update() ->
-    test_update(100).
-
-test_update(N) ->
-    quickcheck(numtests(N, prop_update())).
 
 %%====================================================================
 %% properties

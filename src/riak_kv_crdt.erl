@@ -40,7 +40,7 @@
 
 -ifdef(TEST).
 -ifdef(EQC).
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 -include_lib("eqc/include/eqc.hrl").
 -endif.
 -include_lib("eunit/include/eunit.hrl").
@@ -675,18 +675,6 @@ is_crdt_test_() ->
              end)]}.
 
 -ifdef(EQC).
--define(QC_OUT(P),
-        eqc:on_output(fun(Str, Args) ->
-                              io:format(user, Str, Args) end, P)).
-
--define(TEST_TIME_SECONDS, 10).
--define(TIMED_QC(Prop), eqc:quickcheck(?QC_OUT(eqc:testing_time(?TEST_TIME_SECONDS, Prop)))).
-
-eqc_test_() ->
-    {timeout,
-     60,
-     ?_test(?TIMED_QC(prop_binary_roundtrip()))}.
-
 prop_binary_roundtrip() ->
     ?FORALL({_Type, Mod}, oneof(?MOD_MAP),
             begin

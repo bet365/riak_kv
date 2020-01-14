@@ -33,7 +33,8 @@
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
--export([within_error_check/3, gen_op/0, update_expected/3, eqc_state_value/1]).
+-export([within_error_check/3, gen_op/0, update_expected/3, eqc_state_value/1,
+        prop_hll_converge/0]).
 -define(NUMTESTS, 1000).
 -endif.
 
@@ -188,7 +189,9 @@ to_version(_Version, HllSet) ->
 stats(HllSet) ->
     [{S, stat(S, HllSet)} || S <- ?STATS].
 
--spec stat(stat(), hllset()) -> byte() | precision() | undefined.
+-spec stat(stat(), hllset()) -> 1..255 | 4..16 | undefined.
+%% using predefined types byte() | precision() has issues in dialyzer, and so
+%% redfining directly in the spec.
 stat(bytes, HllSet) ->
     hyper:bytes(HllSet);
 stat(precision, HllSet) ->
@@ -234,7 +237,6 @@ check_precision_and_reduce(_, {_, _, HllSet}) ->
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
--ifdef(TEST).
 
 -ifdef(EQC).
 
@@ -309,13 +311,12 @@ within_error_check(Card, HllSet, HllVal) ->
         _ -> trunc(HllVal) == Card
     end.
 
-eqc_value_test_() ->
-    {timeout, 200, [?_assert(crdt_statem_eqc:prop_converge({0, dict:new()},
-                                                           1000,
-                                                           ?MODULE))]}.
+prop_hll_converge() ->
+    crdt_statem_eqc:prop_converge({0, dict:new()},?MODULE).
 
 -endif.
 
+-ifdef(TEST).
 unique_merge_test() ->
     {ok, A1} = update({add, <<"bar">>}, 1, new()),
     {ok, B1} = update({add, <<"baz">>}, 2, new()),

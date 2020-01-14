@@ -27,7 +27,7 @@
 -define(FIELD_PATTERN, "^(.*)_(counter|gset|set|register|flag|map|hll)$").
 
 -ifdef(TEST).
--compile(export_all).
+-compile([export_all, nowarn_export_all]).
 -include_lib("eunit/include/eunit.hrl").
 -include("riak_kv_types.hrl").
 -endif.

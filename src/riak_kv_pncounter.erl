@@ -40,7 +40,8 @@
 %% EQC API
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
--export([gen_op/0, update_expected/3, eqc_state_value/1]).
+-export([gen_op/0, update_expected/3, eqc_state_value/1,
+         prop_pncounter_converge/0]).
 -endif.
 
 -ifdef(TEST).
@@ -50,15 +51,6 @@
 -export_type([pncounter/0, pncounter_op/0]).
 
 -opaque pncounter() :: {riak_kv_gcounter:gcounter(), riak_kv_gcounter:gcounter()}.
-%% Redeclaring pncounter() with -type to please dialyzer, which would
-%% otherwise issue the following warning:
-%%  riak_kv_pncounter.erl:100: Invalid type specification for
-%%    function riak_kv_pncounter:merge/2. The success typing is
-%%    ({[{_,pos_integer()}],[{_,pos_integer()}]},{[{_,pos_integer()}],[{_,pos_integer()}]})
-%%    -> {[{_,pos_integer()}],[{_,pos_integer()}]}
-%% Apparently, dialyzer only accepts plain variables for args having
-%% an opaque type spec.
--type  pncounter_() :: {riak_kv_gcounter:gcounter(), riak_kv_gcounter:gcounter()}.
 -type pncounter_op() :: riak_kv_gcounter:gcounter_op() | decrement_op().
 -type decrement_op() :: decrement | {decrement, pos_integer()}.
 
@@ -106,7 +98,7 @@ update({decrement, By}, Actor, {Incr, Decr}) when is_integer(By), By > 0 ->
 
 %% @doc Merge two `pncounter()'s to a single `pncounter()'. This is the Least Upper Bound
 %% function described in the literature.
--spec merge(pncounter_(), pncounter_()) -> pncounter_().
+-spec merge(pncounter(), pncounter()) -> pncounter().
 merge({Incr1, Decr1}, {Incr2, Decr2}) ->
     MergedIncr =  riak_kv_gcounter:merge(Incr1, Incr2),
     MergedDecr =  riak_kv_gcounter:merge(Decr1, Decr2),
@@ -143,7 +135,6 @@ from_binary(<<?TAG:8/integer, ?V1_VERS:8/integer,
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
--ifdef(TEST).
 
 -ifdef(EQC).
 %% EQC generator
@@ -167,10 +158,11 @@ update_expected(_ID, _Op, Prev) ->
 eqc_state_value(S) ->
     S.
 
-eqc_value_test_() ->
-    {timeout, 120, [?_assert(crdt_statem_eqc:prop_converge(0, 1000, ?MODULE))]}.
+prop_pncounter_converge() ->
+    crdt_statem_eqc:prop_converge(0, ?MODULE).
 -endif.
 
+-ifdef(TEST).
 new_test() ->
     ?assertEqual({[], []}, new()).
 
