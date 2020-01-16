@@ -45,6 +45,7 @@
          bucket_type_update/1,
          bucket_type_reset/1,
          bucket_type_list/1,
+         activate_split_backend/1,
          add_split_backend/1,
          remove_split_backend/1]).
 
@@ -613,6 +614,28 @@ bucket_type_is_first(It, false) ->
             bucket_type_is_first(riak_core_bucket_type:itr_next(It), Active)
     end.
 
+activate_split_backend([Name]) when is_list(Name) ->
+    activate_split_backend(list_to_atom(Name));
+activate_split_backend(Name) when is_atom(Name) ->
+    case riak_core_metadata:get({split_backend, splits}, Name) of
+        false ->
+            riak_core_metadata:put({split_backend, splits}, Name, active),
+            case riak_core_metadata:get({split_backend, splits}, Name) of
+                false ->
+                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
+                    error;
+                active ->
+                    io:format("Succesfully activated backend: ~p~n", [Name]),
+                    ok
+            end;
+        active ->
+            io:format("Backend: ~p is already active", [Name]),
+            ok;
+        undefined ->
+            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
+            error
+    end.
+
 
 add_split_backend([Type, Name]) when is_list(Type) andalso is_list(Name) ->
     add_split_backend([list_to_atom(Type), list_to_atom(Name)]);
@@ -621,7 +644,7 @@ add_split_backend([Type, Name]) ->
         true ->
             put_and_confirm_metadata(Type, Name);
         false ->
-            io:format("Backend type: ~p is not a valid type. Supported types are bitcask and leveldb", [Type]),
+            io:format("Backend type: ~p is not a valid type. Supported types are bucket, key and value~n", [Type]),
             error
     end.
 
@@ -643,17 +666,17 @@ remove_split_backend([Type, Name]) ->
             end
     end.
 
-put_and_confirm_metadata(Type, Name) ->
+put_and_confirm_metadata(_Type, Name) ->
     case riak_core_metadata:get({split_backend, splits}, Name) of
         undefined ->
 %%            Config = riak_kv_split_backend:get_backend_config(Name, Type),
-            riak_core_metadata:put({split_backend, splits}, Name, Type),
+            riak_core_metadata:put({split_backend, splits}, Name, false),
             case riak_core_metadata:get({split_backend, splits}, Name) of
                 undefined ->
-                    io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [Type, Name]),
+                    io:format("Failed to create new backend type: ~p and bucket: ~p Please check logs", [false, Name]),
                     error;
                 _ ->
-                    io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [Type, Name]),
+                    io:format("Succesfully created backend type: ~p, Bucket: ~p~n", [false, Name]),
                     ok
             end;
         _ ->
