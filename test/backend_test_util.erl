@@ -63,6 +63,7 @@ basic_store_and_fetch(Backend, State) ->
     fold_buckets(Backend, State5).
 
 fold_buckets(Backend, State) ->
+    ct:pal("##########################Fold buckets"),
     {B1, B2, _K1, _K2} = make_bs_and_ks(Backend),
     FoldBucketsFun =
         fun(Bucket, Acc) ->
@@ -81,6 +82,7 @@ fold_buckets(Backend, State) ->
     fold_keys(Backend, State).
 
 fold_keys(Backend, State) ->
+    ct:pal("##########################Fold keys"),
     {B1, B2, K1, K2} = make_bs_and_ks(Backend),
 
     FoldKeysFun =
@@ -146,6 +148,8 @@ fold_keys(Backend, State) ->
         delete_object(Backend, State).
 
 delete_object(Backend, State) ->
+    ct:pal("##########################Delete Object for backend: ~p", [Backend]),
+
     {_B1, B2, _K1, K2} = make_bs_and_ks(Backend),
     {ok, State2} =  Backend:delete(B2, K2, [], State),
     ?assertMatch({error, not_found, _},

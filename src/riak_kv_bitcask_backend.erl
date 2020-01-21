@@ -246,7 +246,7 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
                  {ok, state()} |
                  {error, term(), state()}.
 put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    lager:info("Put 1"),
+    ct:pal("Put 1 for bucket: ~p key: ~p and val: ~p", [Bucket, PrimaryKey, Val]),
     Split = get_split(Bucket, PrimaryKey),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}, {split, binary_to_atom(Split, latin1)}],
@@ -278,11 +278,16 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State)
     end.
 
 add_split_opts(Bucket, Opts) ->
-    case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
+    case Bucket of
         undefined ->
             Opts;
         _ ->
-            [{split, binary_to_atom(Bucket, latin1)} | Opts]
+            case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
+                undefined ->
+                    Opts;
+                _ ->
+                    [{split, binary_to_atom(Bucket, latin1)} | Opts]
+            end
     end.
 
 get_split(Bucket, Key) ->
@@ -305,8 +310,11 @@ get_split(Bucket, Key) ->
 -spec delete(riak_object:bucket(), riak_object:key(), [index_spec()], state()) ->
                     {ok, state()}.
 delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, Key),
-    ok = bitcask_manager:delete(Ref, BitcaskKey),
+    Split = get_split(Bucket, Key),
+    BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, Key),
+    ct:pal("Deleting Bucket: ~p Key: ~p and split: ~p~n", [Bucket, Key, Split]),
+    ct:pal("Key to delete: ~p~n", [BitcaskKey]),
+    ok = bitcask_manager:delete(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)}]),
     {ok, State}.
 
 %% @doc Fold over all the buckets.
@@ -435,7 +443,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, ObjectFolder};
         false ->
-            FoldResult = bitcask:fold(Ref, FoldFun, Acc, FoldOpts),
+            FoldResult = bitcask_manager:fold(Ref, FoldFun, Acc, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -607,6 +615,10 @@ make_bitcask_key(3, {Bucket, Split}, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
+%%make_bitcask_key(3, Bucket, Key) ->
+%%    SplitSz = size(Split),
+%%    BucketSz = size(Bucket),
+%%    <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
 
 
@@ -765,13 +777,23 @@ check_fcntl() ->
 %% Return a function to fold over the buckets on this backend
 fold_buckets_fun(FoldBucketsFun) ->
     fun(#bitcask_entry{key=BK}, {Acc, BucketSet}) ->
-            {Bucket, _} = make_riak_key(BK),
-            case sets:is_element(Bucket, BucketSet) of
-                true ->
-                    {Acc, BucketSet};
-                false ->
-                    {FoldBucketsFun(Bucket, Acc),
-                     sets:add_element(Bucket, BucketSet)}
+            case make_riak_key(BK) of
+                {Bucket, _} ->
+                    case sets:is_element(Bucket, BucketSet) of
+                        true ->
+                            {Acc, BucketSet};
+                        false ->
+                            {FoldBucketsFun(Bucket, Acc),
+                                sets:add_element(Bucket, BucketSet)}
+                    end;
+                {_S, Bucket, _} ->
+                    case sets:is_element(Bucket, BucketSet) of
+                        true ->
+                            {Acc, BucketSet};
+                        false ->
+                            {FoldBucketsFun(Bucket, Acc),
+                                sets:add_element(Bucket, BucketSet)}
+                    end
             end
     end.
 
@@ -779,8 +801,12 @@ fold_buckets_fun(FoldBucketsFun) ->
 %% Return a function to fold over keys on this backend
 fold_keys_fun(FoldKeysFun, undefined) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-            {Bucket, Key} = make_riak_key(BK),
-            FoldKeysFun(Bucket, Key, Acc)
+        case make_riak_key(BK) of
+            {_S, Bucket, Key} ->
+                FoldKeysFun(Bucket, Key, Acc);
+            {Bucket, Key} ->
+                FoldKeysFun(Bucket, Key, Acc)
+        end
     end;
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
@@ -807,8 +833,12 @@ fold_keys_fun(FoldKeysFun, Bucket) ->
 %% Return a function to fold over keys on this backend
 fold_objects_fun(FoldObjectsFun, undefined) ->
     fun(BK, Value, Acc) ->
-            {Bucket, Key} = make_riak_key(BK),
-            FoldObjectsFun(Bucket, Key, Value, Acc)
+            case make_riak_key(BK) of
+                {_S, Bucket, Key} ->
+                    FoldObjectsFun(Bucket, Key, Value, Acc);
+                {Bucket, Key} ->
+                    FoldObjectsFun(Bucket, Key, Value, Acc)
+            end
     end;
 fold_objects_fun(FoldObjectsFun, Bucket) ->
     fun(BK, Value, Acc) ->
@@ -886,9 +916,33 @@ make_data_dir(PartitionFile) ->
 
 %% @private
 data_directory_cleanup(DirPath) ->
+    ct:pal("DirPath: ~p", [DirPath]),
     case file:list_dir(DirPath) of
         {ok, Files} ->
-            [file:delete(filename:join([DirPath, File])) || File <- Files],
+            ct:pal("Files in Dir: ~p", [Files]),
+
+%%            Delete = [file:delete(filename:join([DirPath, File])) || File <- Files],
+            lists:foreach(
+                fun(File) ->
+                    ct:pal("iS FILE: ~p, ~p", [File, filelib:is_file(File)]),
+                    case filelib:is_dir(filename:join([DirPath, File])) of
+                        false ->
+                            ct:pal("Here?????"),
+                            file:delete(filename:join([DirPath, File]));
+                        true ->
+                            case file:list_dir(filename:join([DirPath, File])) of
+                                {ok, Files1} ->
+                                    Deleted = [file:delete(filename:join([DirPath, File, File1])) || File1 <- Files1],
+                                    ct:pal("Sub level of files, were they delete: ~p~n", [Deleted]),
+                                    file:del_dir(filename:join([DirPath, File]));
+                                _ ->
+                                    ct:pal("Here???222222222222222222222222222222"),
+                                    ignore
+                            end
+                    end
+                end, Files),
+
+            ct:pal("Did del work?: ~p", [file:list_dir(DirPath)]),
             file:del_dir(DirPath);
         _ ->
             ignore
@@ -1128,6 +1182,7 @@ simple_test_() ->
     Path = riak_kv_test_util:get_test_dir("bitcask-backend"),
     ?assertCmd("rm -rf " ++ Path ++ "/*"),
     application:set_env(bitcask, data_root, ""),
+    riak_core_metadata_manager:start_link([{data_dir, "test/md/bitcask-backend"}]),
     backend_test_util:standard_test_gen(?MODULE,
                                         [{data_root, Path}]).
 
@@ -1135,6 +1190,7 @@ custom_config_test_() ->
     Path = riak_kv_test_util:get_test_dir("bitcask-backend"),
     ?assertCmd("rm -rf " ++ Path ++ "/*"),
     application:set_env(bitcask, data_root, ""),
+    riak_core_metadata_manager:start_link([{data_dir, "test/md/bitcask-backend"}]),
     backend_test_util:standard_test_gen(?MODULE,
                                         [{data_root, Path}]).
 
