@@ -134,6 +134,7 @@ start(Partition, Config0) ->
         ],
     Config = BaseConfig ++ KeyOpts,
     KeyVsn = ?CURRENT_VERSION,
+    ct:pal("Do we get here 11111 ##############"),
 
     %% Get the data root directory
     case app_helper:get_prop_or_env(data_root, Config, bitcask) of
@@ -145,14 +146,18 @@ start(Partition, Config0) ->
             PartitionStr = integer_to_list(Partition),
             case get_data_dir(DataRoot, PartitionStr) of
                 {ok, DataDir} ->
+                    ct:pal("Do we get here 222222 ##############"),
+
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
                     BitcaskOpts1 = [{find_split_fun, fun find_split/1}, {upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
-
+                    ct:pal("Do we get here 22222.55555 ##############"),
                     Backends = fetch_metadata_backends(),
+                    ct:pal("Do we get here 33333 ##############"),
                     case Backends of
                         [] ->
+                            ct:pal("Do we get here 444444 ##############"),
                             start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn);
                         _ ->
                             {ok, State} = start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn),
@@ -169,6 +174,7 @@ start(Partition, Config0) ->
 start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn) ->
     case bitcask_manager:open(BitcaskDir, BitcaskOpts) of
         Ref when is_reference(Ref) ->
+            ct:pal("Bitcask backend started"),
             check_fcntl(),
             schedule_merge(Ref),
             maybe_schedule_sync(Ref),
@@ -203,7 +209,6 @@ start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_di
 %% @doc Stop the bitcask backend
 -spec stop(state()) -> ok.
 stop(#state{ref=Ref}) ->
-    lager:info("Call to terminate, ref being used is: ~p and the its val is: ~p~n", [Ref, erlang:get(Ref)]),
     case Ref of
         undefined ->
             ok;
@@ -221,7 +226,6 @@ get(Bucket, Key, State) ->
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
     Split = get_split(Bucket, Key),
     BitcaskKey = make_bitcask_key(KVers, {Bucket, Split}, Key),
-    lager:info("Doing manager get with paras: ~p, ~p, Ref: ~p~n", [BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts], erlang:get(Ref)]),
     case bitcask_manager:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
         {ok, Value} ->
             {ok, Value, State};
@@ -246,7 +250,6 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
                  {ok, state()} |
                  {error, term(), state()}.
 put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    ct:pal("Put 1 for bucket: ~p key: ~p and val: ~p", [Bucket, PrimaryKey, Val]),
     Split = get_split(Bucket, PrimaryKey),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}, {split, binary_to_atom(Split, latin1)}],
@@ -262,7 +265,6 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=
                  {error, term(), state()}.
 put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     Split = get_split(Bucket, PrimaryKey),
-    lager:info("getting split name for Bucket: ~p and key: ~p Split is: ~p~n", [Bucket, PrimaryKey, binary_to_atom(Split, latin1)]),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{split, binary_to_atom(Split, latin1)}],
     case bitcask_manager:put(Ref, BitcaskKey, Val, Opts) of
@@ -277,6 +279,10 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State)
             {error, Reason, State}
     end.
 
+-ifdef(TEST).
+add_split_opts(_, Opts) ->
+    Opts.
+-else.
 add_split_opts(Bucket, Opts) ->
     case Bucket of
         undefined ->
@@ -289,7 +295,12 @@ add_split_opts(Bucket, Opts) ->
                     [{split, binary_to_atom(Bucket, latin1)} | Opts]
             end
     end.
+-endif.
 
+-ifdef(TEST).
+get_split(_, _) ->
+    <<"default">>.
+-else.
 get_split(Bucket, Key) ->
     case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
         undefined ->
@@ -302,6 +313,7 @@ get_split(Bucket, Key) ->
         _SplitType ->
             Bucket
     end.
+-endif.
 
 %% @doc Delete an object from the bitcask backend
 %% NOTE: The bitcask backend does not currently support
@@ -312,8 +324,6 @@ get_split(Bucket, Key) ->
 delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
     Split = get_split(Bucket, Key),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, Key),
-    ct:pal("Deleting Bucket: ~p Key: ~p and split: ~p~n", [Bucket, Key, Split]),
-    ct:pal("Key to delete: ~p~n", [BitcaskKey]),
     ok = bitcask_manager:delete(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)}]),
     {ok, State}.
 
@@ -384,7 +394,6 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask_manager:open(filename:join(DataRoot, DataFile), SplitOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    lager:info("NEw ref state: ~p~n", [erlang:get(Ref1)]),
                                     bitcask_manager:fold_keys(Ref1, FoldFun, Acc, FoldOpts)
                                 after
                                     bitcask_manager:close(Ref1)
@@ -495,17 +504,25 @@ activate_backend(Split, #state{ref = Ref} = State) ->
 
 is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).
-
+-ifdef(TEST).
 fetch_metadata_backends()->
+    [].
+-else.
+fetch_metadata_backends()->
+    ct:pal("About to get iterator"),
     Itr = riak_core_metadata:iterator({split_backend, splits}),
+    ct:pal("Iterator: ~p~n", [Itr]),
     iterate(Itr, []).
 
 iterate(Itr, Acc) ->
     case riak_core_metadata:itr_done(Itr) of
         true ->
+            ct:pal("Iterator done"),
             Acc;
         false ->
+            ct:pal("Iterator not doen and val: ~p~n", [riak_core_metadata:itr_key_values(Itr)]),
             {Key, [Val]} = riak_core_metadata:itr_key_values(Itr),
+            ct:pal("Iterator keys vals: ~p~n", [{Key, Val}]),
             NewItr = riak_core_metadata:itr_next(Itr),
             case Val of
                 ['$deleted'] ->
@@ -514,13 +531,14 @@ iterate(Itr, Acc) ->
                     iterate(NewItr, [{Key, Val} | Acc])
             end
     end.
+-endif.
+
+
 
 %% @doc Get the size of the bitcask backend (in number of keys)
 -spec data_size(state()) -> undefined | {non_neg_integer(), objects}.
 data_size(State) ->
-    lager:info("Do we get to the data size call?"),
     Status = status(State),
-    lager:info("Fetched status: ~p~n", [Status]),
     case proplists:get_value(key_count, Status) of
         undefined -> undefined;
         KeyCount -> {KeyCount, objects}
@@ -704,7 +722,6 @@ encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
 
 
 find_split(Key) ->
-    lager:info("Finding Key has been called for Key: ~p and decoded Key: ~p~n", [Key, make_riak_key(Key)]),
     case make_riak_key(Key) of
         {Split, {_Type, _Bucket}, _Key} ->
             binary_to_atom(Split, latin1);
@@ -812,7 +829,6 @@ fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         case make_riak_key(BK) of
             {_S, B, Key} ->
-                lager:info("FoldKeysFun bucket: ~p and decoded : ~p~n", [Bucket, B]),
                 case B =:= Bucket of
                     true ->
                         FoldKeysFun(B, Key, Acc);
@@ -916,33 +932,25 @@ make_data_dir(PartitionFile) ->
 
 %% @private
 data_directory_cleanup(DirPath) ->
-    ct:pal("DirPath: ~p", [DirPath]),
     case file:list_dir(DirPath) of
         {ok, Files} ->
-            ct:pal("Files in Dir: ~p", [Files]),
-
 %%            Delete = [file:delete(filename:join([DirPath, File])) || File <- Files],
             lists:foreach(
                 fun(File) ->
-                    ct:pal("iS FILE: ~p, ~p", [File, filelib:is_file(File)]),
                     case filelib:is_dir(filename:join([DirPath, File])) of
                         false ->
-                            ct:pal("Here?????"),
                             file:delete(filename:join([DirPath, File]));
                         true ->
                             case file:list_dir(filename:join([DirPath, File])) of
                                 {ok, Files1} ->
-                                    Deleted = [file:delete(filename:join([DirPath, File, File1])) || File1 <- Files1],
-                                    ct:pal("Sub level of files, were they delete: ~p~n", [Deleted]),
+                                    [file:delete(filename:join([DirPath, File, File1])) || File1 <- Files1],
                                     file:del_dir(filename:join([DirPath, File]));
                                 _ ->
-                                    ct:pal("Here???222222222222222222222222222222"),
                                     ignore
                             end
                     end
                 end, Files),
 
-            ct:pal("Did del work?: ~p", [file:list_dir(DirPath)]),
             file:del_dir(DirPath);
         _ ->
             ignore
@@ -1270,6 +1278,7 @@ key_version_test() ->
     application:set_env(bitcask, small_keys, true),
     {ok, S2} = ?MODULE:start(42, []),
 
+%%    stop_metadata_apps(),
     {ok, L0} = ?MODULE:fold_keys(FoldKeysFun, [], [], S2),
     L = lists:sort(L0),
     ?_assertEqual([
@@ -1280,6 +1289,17 @@ key_version_test() ->
                    {<<"b5">>, <<"k1">>}
                   ],
                   L).
+
+%%startup_metadata_apps() ->
+%%    riak_core_metadata_events:start_link(),
+%%    riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+%%    riak_core_metadata_hashtree:start_link().
+%%
+%%stop_metadata_apps() ->
+%%    riak_kv_test_util:stop_process(riak_core_metadata_events),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_manager),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
+
 
 -ifdef(EQC).
 

@@ -209,10 +209,13 @@ start_backend(Name, Module, Partition, Config) ->
             {ok, State} ->
                 {Name, Module, State};
             {error, Reason} ->
+                ct:pal("Did the start fail for module: ~p~n", [Module]),
                 {Module, Reason}
         end
     catch
         _:Reason1 ->
+            ct:pal("Did the start fail for reason: ~p~n", [Reason1]),
+            ct:pal("Did the start fail for module2: ~p~n", [erlang:get_stacktrace()]),
              {Module, Reason1}
     end.
 
@@ -672,6 +675,7 @@ multi_backend_test_() ->
              %% start the ring manager
              {ok, P1} = riak_core_ring_events:start_link(),
              {ok, P2} = riak_core_ring_manager:start_link(test),
+%%             startup_metadata_apps(),
              application:load(riak_core),
              application:set_env(riak_core, default_bucket_props, []),
 
@@ -687,6 +691,7 @@ multi_backend_test_() ->
              ?assertCmd("rm -rf " ++ BPath ++ "/*"),
              unlink(P1),
              unlink(P2),
+%%             stop_metadata_apps(),
              catch exit(P1, kill),
              catch exit(P2, kill),
              wait_until_dead(P1),
@@ -701,6 +706,7 @@ multi_backend_test_() ->
 
                        %% Run the standard backend test...
                        Config = sample_config(),
+                   ct:pal("########################### Running Simple Test ####################"),
                        backend_test_util:standard_test_fun(?MODULE, Config)
                end
               }
@@ -840,9 +846,11 @@ extra_callback_test() ->
                [{bitcask, riak_kv_bitcask_backend, []},
                 {memory, riak_kv_memory_backend, []},
                 {eleveldb, riak_kv_eleveldb_backend, []}]}],
+    ct:pal("############################## Starting test ##############################"),
     {ok, State} = start(0, Config),
     callback(make_ref(), ignore_me, State),
     stop(State),
+%%    stop_metadata_apps(),
     application:stop(bitcask).
 
 bad_config_test() ->
@@ -881,5 +889,15 @@ wait_until_dead(Pid) when is_pid(Pid) ->
     end;
 wait_until_dead(_) ->
     ok.
+
+%%startup_metadata_apps() ->
+%%    riak_core_metadata_events:start_link(),
+%%    riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+%%    riak_core_metadata_hashtree:start_link().
+%%
+%%stop_metadata_apps() ->
+%%    riak_kv_test_util:stop_process(riak_core_metadata_events),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_manager),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
 
 -endif.

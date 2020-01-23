@@ -55,6 +55,7 @@ make_bs_and_ks(Backend) ->
      make_test_key(Backend, 2)}.
 
 basic_store_and_fetch(Backend, State) ->
+    ct:pal("1111111111111111111111111"),
     {B1, B2, K1, K2} = make_bs_and_ks(Backend),
     {ok, State2} = Backend:put(B1, K1, [], <<"v1">>, State),
     {ok, State3} = Backend:put(B2, K2, [], <<"v2">>, State2),
@@ -63,7 +64,7 @@ basic_store_and_fetch(Backend, State) ->
     fold_buckets(Backend, State5).
 
 fold_buckets(Backend, State) ->
-    ct:pal("##########################Fold buckets"),
+    ct:pal("2222222222222222222"),
     {B1, B2, _K1, _K2} = make_bs_and_ks(Backend),
     FoldBucketsFun =
         fun(Bucket, Acc) ->
@@ -82,7 +83,7 @@ fold_buckets(Backend, State) ->
     fold_keys(Backend, State).
 
 fold_keys(Backend, State) ->
-    ct:pal("##########################Fold keys"),
+    ct:pal("333333333333333333"),
     {B1, B2, K1, K2} = make_bs_and_ks(Backend),
 
     FoldKeysFun =
@@ -148,8 +149,7 @@ fold_keys(Backend, State) ->
         delete_object(Backend, State).
 
 delete_object(Backend, State) ->
-    ct:pal("##########################Delete Object for backend: ~p", [Backend]),
-
+    ct:pal("4444444444444444444444444444444"),
     {_B1, B2, _K1, K2} = make_bs_and_ks(Backend),
     {ok, State2} =  Backend:delete(B2, K2, [], State),
     ?assertMatch({error, not_found, _},
@@ -157,6 +157,7 @@ delete_object(Backend, State) ->
     fold_objects(Backend, State2).
 
 fold_objects(Backend, State) ->
+    ct:pal("555555555555555555555555555555555"),
     {B1, _B2, K1, _K2} = make_bs_and_ks(Backend),
     B3 = make_test_bucket(Backend, 3),
     K3 = make_test_key(Backend, 3),
@@ -205,6 +206,7 @@ fold_objects(Backend, State) ->
     empty_check(Backend, State2).
 
 empty_check(Backend, State) ->
+    ct:pal("66666666666666666666666666"),
     {B1, _B2, K1, _K2} = make_bs_and_ks(Backend),
     B3 = make_test_bucket(Backend, 3),
     K3 = make_test_key(Backend, 3),
@@ -216,8 +218,21 @@ empty_check(Backend, State) ->
 
 setup({BackendMod, Config}) ->
     %% Start the backend
+%%    startup_metadata_apps(),
     {ok, S} = BackendMod:start(42, Config),
+    ct:pal("Has backend stared for backend mod: ~p~n", [BackendMod]),
     {BackendMod, S}.
 
 cleanup({BackendMod, S}) ->
+%%    stop_metadata_apps(),
     ok = BackendMod:stop(S).
+
+%%startup_metadata_apps() ->
+%%    riak_core_metadata_events:start_link(),
+%%    riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
+%%    riak_core_metadata_hashtree:start_link().
+%%
+%%stop_metadata_apps() ->
+%%    riak_kv_test_util:stop_process(riak_core_metadata_events),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_manager),
+%%    riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
