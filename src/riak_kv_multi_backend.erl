@@ -209,13 +209,10 @@ start_backend(Name, Module, Partition, Config) ->
             {ok, State} ->
                 {Name, Module, State};
             {error, Reason} ->
-                ct:pal("Did the start fail for module: ~p~n", [Module]),
                 {Module, Reason}
         end
     catch
         _:Reason1 ->
-            ct:pal("Did the start fail for reason: ~p~n", [Reason1]),
-            ct:pal("Did the start fail for module2: ~p~n", [erlang:get_stacktrace()]),
              {Module, Reason1}
     end.
 
@@ -889,15 +886,5 @@ wait_until_dead(Pid) when is_pid(Pid) ->
     end;
 wait_until_dead(_) ->
     ok.
-
-%%startup_metadata_apps() ->
-%%    riak_core_metadata_events:start_link(),
-%%    riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
-%%    riak_core_metadata_hashtree:start_link().
-%%
-%%stop_metadata_apps() ->
-%%    riak_kv_test_util:stop_process(riak_core_metadata_events),
-%%    riak_kv_test_util:stop_process(riak_core_metadata_manager),
-%%    riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
 
 -endif.

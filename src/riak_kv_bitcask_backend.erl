@@ -44,6 +44,7 @@
          activate_backend/2,
          is_backend_active/2,
          fetch_metadata_backends/0,
+         special_merge/3,
          callback/3]).
 
 -export([data_size/1,
@@ -122,7 +123,7 @@ capabilities(_, _) ->
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config0) ->
     rand:seed(exrop, os:timestamp()),
-
+%%    Config0 = proplists:get_value(start_md_backends, Config01, true),
     BaseConfig = proplists:delete(small_keys, Config0),
     KeyOpts =
         [
@@ -153,7 +154,13 @@ start(Partition, Config0) ->
                     BitcaskOpts = set_mode(read_write, Config),
                     BitcaskOpts1 = [{find_split_fun, fun find_split/1}, {upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
                     ct:pal("Do we get here 22222.55555 ##############"),
-                    Backends = fetch_metadata_backends(),
+                    Backends =
+                        case proplists:get_value(start_md_backends, Config, true) of
+                            true ->
+                                fetch_metadata_backends();
+                            false ->
+                                []
+                        end,
                     ct:pal("Do we get here 33333 ##############"),
                     case Backends of
                         [] ->
@@ -191,19 +198,23 @@ start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1
             {error, Reason1}
     end.
 
-start_additional_split(Splits, State) when false =:= is_list(Splits) ->
+start_additional_split(Splits, State) when is_tuple(Splits) ->
     start_additional_split([Splits], State);
 start_additional_split([], State) ->
     {ok, State};
 start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_dir=DataDir, root=DataRoot, opts=BitcaskOpts} = State) ->
     BitcaskDir = filename:join(DataRoot, DataDir),
-    NewActiveStatus = case ActiveStatus of
-        active ->
-            true;
-        false ->
-            false
-    end,
-    NewRef = bitcask_manager:open(Ref, BitcaskDir, [{split, Split}, {is_active, NewActiveStatus} | BitcaskOpts]),
+    NewActiveStatusOpts = case ActiveStatus of
+                          active ->
+                              [{is_active, true}];
+                          special_merge ->
+                              [{has_merged, true}, {is_active, true}];
+                          false ->
+                              [{is_active, false}]
+                      end,
+    NewOpts = lists:flatten([{split, Split}, NewActiveStatusOpts | BitcaskOpts]),
+    lager:info("New backend being started: ~p~n", [{Split, ActiveStatus}]),
+    NewRef = bitcask_manager:open(Ref, BitcaskDir, NewOpts),
     start_additional_split(Rest, State#state{ref = NewRef}).
 
 %% @doc Stop the bitcask backend
@@ -280,6 +291,8 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State)
     end.
 
 -ifdef(TEST).
+add_split_opts(<<"second_split">> = Bucket, Opts) ->
+    [{split, binary_to_atom(Bucket, latin1)} | Opts];
 add_split_opts(_, Opts) ->
     Opts.
 -else.
@@ -298,6 +311,8 @@ add_split_opts(Bucket, Opts) ->
 -endif.
 
 -ifdef(TEST).
+get_split(<<"second_split">>, _) ->
+    <<"second_split">>;
 get_split(_, _) ->
     <<"default">>.
 -else.
@@ -499,25 +514,32 @@ check_backend_exists(Split, #state{ref = Ref}) ->
 
 
 activate_backend(Split, #state{ref = Ref} = State) ->
+    BState = erlang:get(Ref),
+    {default, DefRef, _DefHasMerged, _DefIsActive} = lists:keyfind(default, 1, element(2, BState)),
+    B2State = erlang:get(DefRef),
+    lager:info("Bitcask readfiles before wrap: ~p~n", [element(5,B2State)]),
     NewRef = bitcask_manager:activate_split(Ref, Split),
+    BState2 = erlang:get(NewRef),
+    {default, DefRef2, _DefHasMerged, _DefIsActive} = lists:keyfind(default, 1, element(2, BState2)),
+    B2State2 = erlang:get(DefRef2),
+    lager:info("Bitcask readfiles after wrap: ~p~n", [element(5,B2State2)]),
+
     {ok, State#state{ref = NewRef}}.
 
 is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).
+
 -ifdef(TEST).
 fetch_metadata_backends()->
     [].
 -else.
 fetch_metadata_backends()->
-    ct:pal("About to get iterator"),
     Itr = riak_core_metadata:iterator({split_backend, splits}),
-    ct:pal("Iterator: ~p~n", [Itr]),
     iterate(Itr, []).
 
 iterate(Itr, Acc) ->
     case riak_core_metadata:itr_done(Itr) of
         true ->
-            ct:pal("Iterator done"),
             Acc;
         false ->
             ct:pal("Iterator not doen and val: ~p~n", [riak_core_metadata:itr_key_values(Itr)]),
@@ -532,6 +554,20 @@ iterate(Itr, Acc) ->
             end
     end.
 -endif.
+
+
+special_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
+    case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
+        {true, true} ->
+            case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
+                {true, true} ->
+                    bitcask_manager:special_merge(Ref, Split1, Split2, Opts);
+                _ ->
+                    lager:error("One or more of the backends scheduled for special_merge are not active: ~p and ~p~n", [Split1, Split2])
+            end;
+        _ ->
+            lager:error("One or more of the backends scheduled for special_merge do not exist: ~p and ~p~n", [Split1, Split2])
+    end.
 
 
 
@@ -760,6 +796,12 @@ merge_check(Ref, BitcaskRoot, BitcaskOpts) ->
         {0, _} ->
             MaxMergeSize = app_helper:get_env(riak_kv,
                                               bitcask_max_merge_size),
+            BState = erlang:get(Ref),
+            {default, DefRef, _, _} = lists:keyfind(default, 1, element(2, BState)),
+            DefState = erlang:get(DefRef),
+            lager:info("Redfiles of Default before merge check is called: ~p~n", [element(5, DefState)]),
+
+
             case bitcask_manager:needs_merge(Ref, [{max_merge_size, MaxMergeSize}]) of
                 {true, Files} ->
                     bitcask_merge_worker:merge(BitcaskRoot, BitcaskOpts, Files);
@@ -1278,9 +1320,10 @@ key_version_test() ->
     application:set_env(bitcask, small_keys, true),
     {ok, S2} = ?MODULE:start(42, []),
 
-%%    stop_metadata_apps(),
     {ok, L0} = ?MODULE:fold_keys(FoldKeysFun, [], [], S2),
     L = lists:sort(L0),
+    riak_kv_test_util:stop_process(riak_core_metadata_manager),
+    riak_kv_test_util:stop_process(riak_core_metadata_events),
     ?_assertEqual([
                    {<<"b1">>, <<"k1">>},
                    {<<"b2">>, <<"k1">>},
@@ -1290,15 +1333,152 @@ key_version_test() ->
                   ],
                   L).
 
-%%startup_metadata_apps() ->
-%%    riak_core_metadata_events:start_link(),
-%%    riak_core_metadata_manager:start_link([{data_dir, "kv_split_backend_test_meta"}]),
-%%    riak_core_metadata_hashtree:start_link().
-%%
-%%stop_metadata_apps() ->
-%%    riak_kv_test_util:stop_process(riak_core_metadata_events),
-%%    riak_kv_test_util:stop_process(riak_core_metadata_manager),
-%%    riak_kv_test_util:stop_process(riak_core_metadata_hashtree).
+create_new_split_test() ->
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    {ok, S} = ?MODULE:start(0, Opts),
+
+    Path = filename:join(["test/bitcask-backend", "0"]),
+    {ok, DataDirs} = file:list_dir(Path),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
+
+    ?assertEqual(["default"], Dirs),
+
+    {ok, S1} = ?MODULE:start_additional_split({second, false}, S),
+
+    {ok, DataDirs1} = file:list_dir(Path),
+    Dirs1 = [Dir || Dir <- DataDirs1, Dir =/= "version.txt"],
+
+    ?assertEqual(["default", "second"], Dirs1),
+    ?assertEqual(true, check_backend_exists(second, S1)),
+    ?assertEqual(false, is_backend_active(second, S1)),
+
+    ok = stop(S1),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
+split_data_test() ->
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b2">>, <<"k1">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k1">>, [], <<"v3">>, S1),
+
+    {ok, <<"v1">>, _} = ?MODULE:get(<<"b1">>, <<"k1">>, S1),
+    {ok, <<"v2">>, _} = ?MODULE:get(<<"b2">>, <<"k1">>, S1),
+    {ok, <<"v3">>, _} = ?MODULE:get(<<"second_split">>, <<"k1">>, S1),
+
+    Path = filename:join(["test/bitcask-backend", "0"]),
+    {ok, DataDirs} = file:list_dir(Path),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
+    ?assertEqual(["default", "second_split"], Dirs),
+    ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
+
+    ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1),
+    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1),
+
+    {ok, SplitFiles} = file:list_dir("test/bitcask-backend/0/second_split"),
+
+    ?assertNotEqual([], SplitFiles),
+
+    ok = stop(S1),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
+special_merge_test() ->
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ct:pal("Files in default location: ~p~n", [file:list_dir("test/bitcask-backend/0/default")]),
+
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b2">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k2">>, [], <<"v2">>, S1),
+
+    ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S1)),
+
+    Path = filename:join(["test/bitcask-backend", "0"]),
+    {ok, DataDirs} = file:list_dir(Path),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
+    ?assertEqual(["default", "second_split"], Dirs),
+    ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
+
+    ct:pal("Files in default location2222: ~p~n", [file:list_dir("test/bitcask-backend/0/default")]),
+
+    ?MODULE:special_merge(default, second_split, S1),
+
+    ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
+
+    ok = stop(S1),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
+fold_keys_test() ->
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b1">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v2">>, S1),
+
+    FoldKeysFun =
+        fun(_Bucket, Key, Acc) ->
+            [ Key | Acc]
+        end,
+
+    {ok, Keys} = ?MODULE:fold_keys(FoldKeysFun, [], [{bucket, <<"b1">>}], S1),
+    {ok, Keys1} = ?MODULE:fold_keys(FoldKeysFun, [], [{bucket, <<"second_split">>}], S1),
+
+    ct:pal("Keys: ~p~n", [Keys]),
+    ct:pal("Keys1: ~p~n", [Keys1]),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(Keys)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(Keys1)),
+
+    ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"second_split">>, <<"k5">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k6">>, [], <<"v2">>, S1),
+
+    {ok, Keys2} = ?MODULE:fold_keys(FoldKeysFun, [], [{bucket, <<"second_split">>}], S1),
+    ct:pal("Keys2: ~p~n", [Keys2]),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
+
+    ok = ?MODULE:special_merge(default, second_split, S1),
+
+    {ok, Keys3} = ?MODULE:fold_keys(FoldKeysFun, [], [{bucket, <<"second_split">>}], S1),
+    ct:pal("Keys3: ~p~n", [Keys3]),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys3)),
+
+    ok = stop(S1),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
 
 
 -ifdef(EQC).
