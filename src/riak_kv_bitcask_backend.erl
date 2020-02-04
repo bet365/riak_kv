@@ -43,7 +43,7 @@
          check_backend_exists/2,
          activate_backend/2,
          is_backend_active/2,
-         fetch_metadata_backends/0,
+         fetch_metadata_backends/1,
          special_merge/3,
          callback/3]).
 
@@ -157,11 +157,12 @@ start(Partition, Config0) ->
                     Backends =
                         case proplists:get_value(start_md_backends, Config, true) of
                             true ->
-                                fetch_metadata_backends();
+                                fetch_metadata_backends(Partition);
                             false ->
                                 []
                         end,
                     ct:pal("Do we get here 33333 ##############"),
+                    lager:info("backends to start: ~p~n", [Backends]),
                     case Backends of
                         [] ->
                             ct:pal("Do we get here 444444 ##############"),
@@ -203,6 +204,7 @@ start_additional_split(Splits, State) when is_tuple(Splits) ->
 start_additional_split([], State) ->
     {ok, State};
 start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_dir=DataDir, root=DataRoot, opts=BitcaskOpts} = State) ->
+    lager:info("Split starting: ~p~n", [Split]),
     BitcaskDir = filename:join(DataRoot, DataDir),
     NewActiveStatusOpts = case ActiveStatus of
                           active ->
@@ -234,8 +236,9 @@ stop(#state{ref=Ref}) ->
                  {error, term(), state()}.
 get(Bucket, Key, State) ->
     get(Bucket, Key, State, []).
-get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
-    Split = get_split(Bucket, Key),
+get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = Partition}=State, Opts) ->
+    Split = get_split(Bucket, Key, Partition),
+    lager:info("Split for get: ~p~n", [Split]),
     BitcaskKey = make_bitcask_key(KVers, {Bucket, Split}, Key),
     case bitcask_manager:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
         {ok, Value} ->
@@ -260,8 +263,8 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State, Opts) ->
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    Split = get_split(Bucket, PrimaryKey),
+put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+    Split = get_split(Bucket, PrimaryKey, Partition),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}, {split, binary_to_atom(Split, latin1)}],
     case bitcask_manager:put(Ref, BitcaskKey, Val, Opts) of
@@ -274,8 +277,8 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    Split = get_split(Bucket, PrimaryKey),
+put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+    Split = get_split(Bucket, PrimaryKey, Partition),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, PrimaryKey),
     Opts = [{split, binary_to_atom(Split, latin1)}],
     case bitcask_manager:put(Ref, BitcaskKey, Val, Opts) of
@@ -291,42 +294,57 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State)
     end.
 
 -ifdef(TEST).
-add_split_opts(<<"second_split">> = Bucket, Opts) ->
+add_split_opts(<<"second_split">> = Bucket, Opts, _Partition) ->
     [{split, binary_to_atom(Bucket, latin1)} | Opts];
-add_split_opts(_, Opts) ->
+add_split_opts(_, Opts, _Partition) ->
     Opts.
 -else.
-add_split_opts(Bucket, Opts) ->
+add_split_opts(Bucket, Opts, Partition) ->
     case Bucket of
         undefined ->
             Opts;
         _ ->
-            case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
+            case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
                 undefined ->
                     Opts;
-                _ ->
-                    [{split, binary_to_atom(Bucket, latin1)} | Opts]
+                BackendStates ->
+                    case lists:keyfind(Partition, 1, BackendStates) of
+                        false ->
+                            Opts;
+                        {Partition, _} ->
+                            [{split, binary_to_atom(Bucket, latin1)} | Opts]
+                    end
             end
     end.
 -endif.
 
 -ifdef(TEST).
-get_split(<<"second_split">>, _) ->
+get_split(<<"second_split">>, _, _) ->
     <<"second_split">>;
-get_split(_, _) ->
+get_split(_, _, _) ->
     <<"default">>.
 -else.
-get_split(Bucket, Key) ->
-    case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Bucket, latin1)) of
+get_split(Bucket, Key, Partition) ->
+    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
         undefined ->
-            case riak_core_metadata:get({split_backend, splits}, binary_to_atom(Key, latin1)) of
+            case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Key, latin1), node()}) of
                 undefined ->
                     <<"default">>;
-                _Split ->
-                    Key
+                BackendStates ->
+                    case lists:keyfind(Partition, 1, BackendStates) of
+                        false ->
+                            <<"default">>;
+                        {Partition, _State} ->
+                            Key
+                    end
             end;
-        _SplitType ->
-            Bucket
+        BackendStates ->
+            case lists:keyfind(Partition, 1, BackendStates) of
+                false ->
+                    <<"default">>;
+                {Partition, _State} ->
+                    Bucket
+            end
     end.
 -endif.
 
@@ -336,8 +354,8 @@ get_split(Bucket, Key) ->
 %% is ignored.
 -spec delete(riak_object:bucket(), riak_object:key(), [index_spec()], state()) ->
                     {ok, state()}.
-delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    Split = get_split(Bucket, Key),
+delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+    Split = get_split(Bucket, Key, Partition),
     BitcaskKey = make_bitcask_key(KeyVsn, {Bucket, Split}, Key),
     ok = bitcask_manager:delete(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)}]),
     {ok, State}.
@@ -394,16 +412,17 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
 fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          data_dir=DataFile,
                                          ref=Ref,
-                                         root=DataRoot}) ->
+                                         root=DataRoot,
+                                         partition = Partition}) ->
     Bucket =  proplists:get_value(bucket, Opts),
-    NewOpts = add_split_opts(Bucket, Opts),
+    NewOpts = add_split_opts(Bucket, Opts, Partition),
     FoldOpts = build_bitcask_fold_opts(NewOpts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
     lager:info("List keys, bucket: ~p and state: ~p and Opts: ~p", [Bucket, erlang:get(Ref)]),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
-            SplitOpts = add_split_opts(Bucket, ReadOpts),
+            SplitOpts = add_split_opts(Bucket, ReadOpts, Partition),
             KeyFolder =
                 fun() ->
                         case bitcask_manager:open(filename:join(DataRoot, DataFile), SplitOpts) of
@@ -530,27 +549,38 @@ is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).
 
 -ifdef(TEST).
-fetch_metadata_backends()->
+fetch_metadata_backends(_Partition)->
     [].
 -else.
-fetch_metadata_backends()->
+fetch_metadata_backends(Partition)->
     Itr = riak_core_metadata:iterator({split_backend, splits}),
-    iterate(Itr, []).
+    iterate(Itr, [], Partition).
 
-iterate(Itr, Acc) ->
+iterate(Itr, Acc, Partition) ->
     case riak_core_metadata:itr_done(Itr) of
         true ->
             Acc;
         false ->
             ct:pal("Iterator not doen and val: ~p~n", [riak_core_metadata:itr_key_values(Itr)]),
-            {Key, [Val]} = riak_core_metadata:itr_key_values(Itr),
+            {{Key, Node}, Val} = riak_core_metadata:itr_key_values(Itr),
             ct:pal("Iterator keys vals: ~p~n", [{Key, Val}]),
+            lager:info("Iterator keys vals: ~p~n", [{Key, Val}]),
             NewItr = riak_core_metadata:itr_next(Itr),
-            case Val of
-                ['$deleted'] ->
-                    iterate(NewItr, Acc);
+            case node() of
+                Node ->
+                    case Val of
+                        ['$deleted'] ->
+                            iterate(NewItr, Acc, Partition);
+                        [Val1] ->
+                            case lists:keyfind(Partition, 1, Val1) of
+                                {Partition, State} ->
+                                    iterate(NewItr, [{Key, State} | Acc], Partition);
+                                false ->
+                                    iterate(NewItr, Acc, Partition)
+                            end
+                    end;
                 _ ->
-                    iterate(NewItr, [{Key, Val} | Acc])
+                    iterate(NewItr, Acc, Partition)
             end
     end.
 -endif.

@@ -621,6 +621,80 @@ bucket_type_is_first(It, false) ->
             bucket_type_is_first(riak_core_bucket_type:itr_next(It), Active)
     end.
 
+%%add_split_backend([Name]) when is_list(Name) ->
+%%    add_split_backend([list_to_atom(Name)]);
+%%add_split_backend([Name]) ->
+%%    put_and_confirm_metadata(Name).
+
+%% TODO create equivilant functions that work across the cluster rather than locally. One way would be via event handler previously
+%% however each node as it receives notification matches with the node name passed via the sender to not put on the same node.
+%% Or we manually call these on each node instead.
+add_split_backend_local([Name]) when is_list(Name) ->
+    add_split_backend_local(list_to_atom(Name));
+add_split_backend_local([Name, Partition]) when is_list(Name) andalso is_list(Partition) ->
+    add_split_backend_local(list_to_atom(Name), list_to_integer(Partition));
+add_split_backend_local(Name) ->
+    {ok, R} = riak_core_ring_manager:get_my_ring(),
+    Partitions = riak_core_ring:my_indices(R),
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+        undefined ->
+            [riak_kv_vnode:add_split_backend(Name, Partition) || Partition <- Partitions],
+            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                undefined ->
+                    io:format("Failed to create backend: ~p on all Partitions~n", [Name]),
+                    ok;
+                X when length(X) =:= length(Partitions) ->
+                    io:format("Succesfully created backend: ~p~n", [Name]),
+                    ok
+            end;
+        Statuses ->
+            case [Partition || Partition <- Partitions, false =:= lists:keymember(Partition, 1, Statuses)] of
+                [] ->
+                    io:format("Backend: ~p has already been created on all partitions for this node~n", [Name]),
+                    ok;
+                NewParts ->
+                    [riak_kv_vnode:add_split_backend(Name, Partition) || Partition <- NewParts],
+                    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                        undefined ->
+                            io:format("Failed to create backend: ~p on select Partitions~n", [Name]),
+                            error;
+                        X when length(X) =:= length(NewParts) ->
+                            io:format("Succesfully created backend: ~p~n", [Name]),
+                            ok
+                    end
+            end
+    end.
+
+add_split_backend_local(Name, Partition) ->
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+        undefined ->
+            riak_kv_vnode:add_split_backend(Name, Partition),
+            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                undefined ->
+                    io:format("Failed to create backend: ~p on Partition: ~p~n", [Name, Partition]),
+                    ok;
+                _ ->
+                    io:format("Succesfully created backend: ~p on Partition: ~p~n", [Name, Partition]),
+                    ok
+            end;
+        Statuses ->
+            case lists:keyfind(Partition, 1, Statuses) of
+                false ->
+                    riak_kv_vnode:add_split_backend(Name, Partition),
+                    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                        undefined ->
+                            io:format("Failed to create backend: ~p on Partition: ~p~n", [Name, Partition]),
+                            ok;
+                        _ ->
+                            io:format("Succesfully created backend: ~p on Partition: ~p~n", [Name, Partition]),
+                            ok
+                    end;
+                {Partition, _State} ->
+                    io:format("Backend: ~p already exists on Partition: ~p~n", [Name, Partition]),
+                    error
+            end
+    end.
+
 %%activate_split_backend([Name]) when is_list(Name) ->
 %%    activate_split_backend(list_to_atom(Name));
 %%activate_split_backend(Name) when is_atom(Name) ->
@@ -648,103 +722,78 @@ activate_split_backend_local([Name]) when is_list(Name) ->
 activate_split_backend_local([Name, Partition]) when is_list(Name) andalso is_list(Partition) ->
     activate_split_backend_local(list_to_atom(Name), list_to_integer(Partition));
 activate_split_backend_local(Name) when is_atom(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        false ->
-            {ok, R} = riak_core_ring_manager:get_my_ring(),
-            Partitions = riak_core_ring:my_indices(R),
-            [riak_kv_vnode:activate_split_backend(Name, Partition) || Partition <- Partitions],
-            case riak_core_metadata:get({split_backend, splits}, Name) of
-                false ->
-                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
-                    error;
-                active ->
-                    io:format("Succesfully activated backend: ~p~n", [Name]),
-                    ok;
-                _ ->
-                    io:format("Backend is in wrong state, investigate what has happened."),
-                    ok
-            end;
-        active ->
-            io:format("Backend: ~p is already active", [Name]),
-            ok;
-        special_merge ->
-            io:format("Backend ~p has been special merged meaning it already exists.", [Name]),
-            ok;
+    {ok, R} = riak_core_ring_manager:get_my_ring(),
+    Partitions = riak_core_ring:my_indices(R),
+    PLength = length(Partitions),
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
         undefined ->
-            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
+            io:format("Backend: ~p does not exist for this node so cannot be activated~n", [Name]),
+            error;
+        BackendStatus when length(BackendStatus) =:= PLength ->
+            Responses = lists:foldl(
+                fun(Partition, Acc) ->
+                    case riak_kv_vnode:activate_split_backend(Name, Partition) of
+                        ok ->
+                            [ok | Acc];
+                        _ ->
+                            Acc
+                    end
+                end, [], Partitions),
+            RLength = length(Responses),
+            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                undefined ->
+                    io:format("Backend: ~p attampted to be activated but is no longer in metadata please investigate~n", [Name]),
+                    error;
+                States when length(States) =:= RLength ->
+                    ActiveStates = [{Partition, State} || {Partition, State} <- States, State =:= active],
+                    case length(ActiveStates) of
+                        RLength ->
+                            io:format("Backend: ~p has been succesfully activated on each partition of this node~n", [Name]),
+                            ok;
+                        _ ->
+                            io:format("Backend: ~p could not be activated on every partition, please investigate~n", [Name]),
+                            error
+                    end;
+                _ ->
+                    io:format("There is a discrepancy between the number of partition backends in metadata and succesful responses from activating partitions, please investigate. Backend: ~p", [Name]),
+                    error
+            end;
+        _ -> %% TODO Review if we should still go ahead and activate those that do exist or wait for all partitions to be in sync and have the backend
+            io:format("Backend: ~p has not been added on every partition for this node so cannot be activated for all partitions~n", [Name]),
             error
     end.
 
 activate_split_backend_local(Name, Partition) when is_atom(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        false ->
-            riak_kv_vnode:activate_split_backend(Name, Partition),
-            case riak_core_metadata:get({split_backend, splits}, Name) of
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+        undefined ->
+            io:format("Backend: ~p does not exist on this node so cannot be activated~n", [Name]),
+            error;
+        BackendStatus ->
+            case lists:keyfind(Partition, 1, BackendStatus) of
                 false ->
-                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
+                    io:format("Backend: ~p does not exist  on Partition: ~p so cannot be activated~n", [Name, Partition]),
                     error;
-                active ->
-                    io:format("Succesfully activated backend: ~p~n", [Name]),
+                {Partition, active} ->
+                    io:format("Backend: ~p is already active", [Name]),
                     ok;
-                _ ->
-                    io:format("Backend is in wrong state, investigate what has happened."),
-                    ok
-            end;
-        active ->
-            io:format("Backend: ~p is already active", [Name]),
-            ok;
-        special_merge ->
-            io:format("Backend ~p has been special merged meaning it already exists.", [Name]),
-            ok;
-        undefined ->
-            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
-            error
-    end.
-
-
-%%add_split_backend([Name]) when is_list(Name) ->
-%%    add_split_backend([list_to_atom(Name)]);
-%%add_split_backend([Name]) ->
-%%    put_and_confirm_metadata(Name).
-
-add_split_backend_local([Name]) when is_list(Name) ->
-    add_split_backend_local(list_to_atom(Name));
-add_split_backend_local([Name, Partition]) when is_list(Name) andalso is_list(Partition) ->
-    add_split_backend_local(list_to_atom(Name), list_to_integer(Partition));
-add_split_backend_local(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        undefined ->
-            {ok, R} = riak_core_ring_manager:get_my_ring(),
-            Partitions = riak_core_ring:my_indices(R),
-            [riak_kv_vnode:add_split_backend(Name, Partition) || Partition <- Partitions],
-            case riak_core_metadata:get({split_backend, splits}, Name) of
-                undefined ->
-                    io:format("Failed to create backend: ~p on all Partitions", [Name]),
+                {Partition, special_merge} ->
+                    io:format("Backend ~p has been special merged meaning it is already active", [Name]),
                     ok;
-                _ ->
-                    io:format("Succesfully created backend: ~p~n", [Name]),
-                    ok
-            end;
-        _ ->
-            io:format("Backend already exists~n"),
-            ok
-    end.
-
-add_split_backend_local(Name, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        undefined ->
-            riak_kv_vnode:add_split_backend(Name, Partition),
-            case riak_core_metadata:get({split_backend, splits}, Name) of
-                undefined ->
-                    io:format("Failed to create backend: ~p on Partition: ~p~n", [Name, Partition]),
-                    ok;
-                _ ->
-                    io:format("Succesfully created backend: ~p~n", [Name]),
-                    ok
-            end;
-        _ ->
-            io:format("Backend already exists~n"),
-            ok
+                {Partition, false} ->
+                    ok = riak_kv_vnode:activate_split_backend(Name, Partition),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    case lists:keyfind(Partition, 1, BackendStatus1) of
+                        false ->
+                            io:format("Failed to activate backend: ~p Please investigate", [Name]),
+                            error;
+                        {Partition, active} ->
+                            io:format("Succesfully activated backend: ~p~n", [Name]),
+                            ok;
+                        _ ->
+                            io:format("Backend is in wrong state after activation, investigate what has happened."),
+                            ok
+                    end
+            end
     end.
 
 special_merge_local([Name]) when is_list(Name) ->
@@ -752,53 +801,100 @@ special_merge_local([Name]) when is_list(Name) ->
 special_merge_local([Name, Partition]) when is_list(Name) andalso is_list(Partition) ->
     special_merge_local(list_to_atom(Name), list_to_integer(Partition));
 special_merge_local(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        active ->
-            {ok, R} = riak_core_ring_manager:get_my_ring(),
-            Partitions = riak_core_ring:my_indices(R),
-            [riak_kv_vnode:special_merge(Name, Partition) || Partition <- Partitions],
-
-            case riak_core_metadata:get({split_backend, splits}, Name) of
-                special_merge ->
-                    io:format("Succesfully merged backend: ~p~n", [Name]),
-                    ok;
+    {ok, R} = riak_core_ring_manager:get_my_ring(),
+    Partitions = riak_core_ring:my_indices(R),
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+        undefined ->
+            io:format("Backend: ~p does not exist so cannot be special_merged~n", [Name]),
+            error;
+        BackendStatus when length(BackendStatus) =:= length(Partitions) ->
+            Responses = lists:foldl(
+                fun(Partition, Acc) ->
+                    case riak_kv_vnode:special_merge(Name, Partition) of
+                        ok ->
+                            [ok | Acc];
+                        _ ->
+                            Acc
+                    end
+                end, [], Partitions),
+            RLength = length(Responses),
+            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                undefined ->
+                    io:format("Backend: ~p attempted to be special_merge but is no longer in metadata please investigate~n", [Name]),
+                    error;
+                BackendStatus1 when length(BackendStatus1) =:= RLength ->
+                    ActiveStates = [{Partition, State} || {Partition, State} <- BackendStatus1, State =:= special_merge],
+                    case length(ActiveStates) of
+                        RLength ->
+                            io:format("Backend: ~p has been succesfully special_merge on each partition of this node~n", [Name]),
+                            ok;
+                        _ ->
+                            io:format("Backend: ~p could not be special_merge on every partition, please investigate~n", [Name]),
+                            error
+                    end;
                 _ ->
-                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
+                    io:format("There is a discrepancy between the number of partition backends in metadata and succesful responses from special_merge partitions, please investigate. Backend: ~p", [Name]),
                     error
             end;
-        false ->
-            io:format("Cannot special merge Bucket: ~p as it is not yet active", [Name]),
-            ok;
-        special_merge ->
-            io:format("Backend has already been special merged"),
-            ok;
-        undefined ->
-            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
+        _ -> %% TODO Review if we should still go ahead and activate those that do exist or wait for all partitions to be in sync and have the backend
+            io:format("Backend: ~p has not been added on every partition for this node so cannot be activated for all partitions~n", [Name]),
             error
     end.
 
 special_merge_local(Name, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, Name) of
-        active ->
-            riak_kv_vnode:special_merge(Name, Partition),
-            case riak_core_metadata:get({split_backend, splits}, Name) of
-                special_merge ->
-                    io:format("Succesfully merged backend: ~p~n", [Name]),
-                    ok;
-                _ ->
-                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
-                    error
-            end;
-        false ->
-            io:format("Cannot special merge Bucket: ~p as it is not yet active", [Name]),
-            ok;
-        special_merge ->
-            io:format("Backend has already been special merged"),
-            ok;
+    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
         undefined ->
-            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
-            error
+            io:format("Backend: ~p does not exist on this node so cannot be special merged~n", [Name]),
+            error;
+        BackendStatus ->
+            case lists:keyfind(Partition, 1, BackendStatus) of
+                false ->
+                    io:format("Backend: ~p does not exist  on Partition: ~p so cannot be special_merged~n", [Name, Partition]),
+                    error;
+                {Partition, false} ->
+                    io:format("Backend: ~p has not yet been activated on Partition: ~p so cannot be special_merged", [Name, Partition]),
+                    ok;
+                {Partition, special_merge} ->
+                    io:format("Backend ~p has already been special_merged on this Partition: ~p~n", [Name, Partition]),
+                    ok;
+                {Partition, active} ->
+                    ok = riak_kv_vnode:special_merge(Name, Partition),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    case lists:keyfind(Partition, 1, BackendStatus1) of
+                        false ->
+                            io:format("Failed to special_merge backend: ~p Please investigate", [Name]),
+                            error;
+                        {Partition, special_merge} ->
+                            io:format("Succesfully special_merged backend: ~p on this Partition: ~p~n", [Name, Partition]),
+                            ok;
+                        _ ->
+                            io:format("Backend is in wrong state after activation, investigate what has happened.~n"),
+                            ok
+                    end
+            end
     end.
+
+%%    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+%%        active ->
+%%            riak_kv_vnode:special_merge(Name, Partition),
+%%            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+%%                special_merge ->
+%%                    io:format("Succesfully merged backend: ~p~n", [Name]),
+%%                    ok;
+%%                _ ->
+%%                    io:format("Failed to activate backend: ~p Please investigate", [Name]),
+%%                    error
+%%            end;
+%%        false ->
+%%            io:format("Cannot special merge Bucket: ~p as it is not yet active", [Name]),
+%%            ok;
+%%        special_merge ->
+%%            io:format("Backend has already been special merged"),
+%%            ok;
+%%        undefined ->
+%%            io:format("Backend: ~p does not exist so cannot be activated~n", [Name]),
+%%            error
+%%    end.
 
 %% Metadata splits has 3 stages of value, 1st is `false` 2nd `active` and 3rd `special_merge` each value
 %% representing the command that has been triggered on the that split.
