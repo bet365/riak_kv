@@ -1392,6 +1392,8 @@ split_data_test() ->
     {ok, S} = ?MODULE:start(0, Opts),
     {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
 
+    ct:pal("================ Bitcask root used in merge: ~p~n", [filename:join(S1#state.root, S1#state.data_dir)]),
+
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
     ?assertEqual(true, is_backend_active(default, S1)),

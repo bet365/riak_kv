@@ -658,7 +658,7 @@ add_split_backend_local(Name) ->
                         undefined ->
                             io:format("Failed to create backend: ~p on select Partitions~n", [Name]),
                             error;
-                        X when length(X) =:= length(NewParts) ->
+                        X when length(X) =:= length(Partitions) ->
                             io:format("Succesfully created backend: ~p~n", [Name]),
                             ok
                     end
