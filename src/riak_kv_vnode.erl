@@ -663,14 +663,12 @@ repair_filter(Target) ->
                                 fun object_info/1).
 
 update_metadata({Name, Type}, Partition) ->
-    lager:info("Updaing metadat with name and type: ~p~n", [{Name, Type}]),
     riak_core_vnode_master:sync_command({Partition, node()},
         {update_metadata, Partition, {Name, Type}, node()},
         riak_kv_vnode_master,
         infinity).
 
 add_split_backend(Name, Partition) ->
-    lager:info("Split backend to be added: ~p for partition: ~p~n", [Name, Partition]),
     riak_core_vnode_master:sync_command({Partition, node()},
         {add_split_backend, Partition, Name},
         riak_kv_vnode_master,
@@ -906,7 +904,6 @@ handle_command(#riak_kv_listkeys_req_v2{bucket=Input, req_id=ReqId, caller=Calle
         Bucket ->
             Filter = none
     end,
-    lager:info("List keys vnode input: ~p~n", [Input]),
     BufferMod = riak_kv_fold_buffer,
     case Bucket of
         '_' ->
@@ -960,7 +957,6 @@ handle_command(?FOLD_REQ{foldfun=FoldFun, acc0=Acc0,
     do_fold(FoldWrapper, Acc0, Sender, Opts, State);
 
 handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModState} = State) ->
-    lager:info("Do we hit add_backend in vnode partition: ~p~n", [{Partition, Name}]),
     case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
         false ->
             {ok, NewModState} = riak_kv_bitcask_backend:start_additional_split({Name, false}, ModState),
@@ -979,7 +975,6 @@ handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModSt
     end;
 
 handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = ModState} = State) ->
-    lager:info("Do we hit activate_backend in vnode partition: ~p~n", [{Partition, Name}]),
     case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
         true ->
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
@@ -1010,13 +1005,11 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
     end;
 
 handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState} = State) ->
-    lager:info("Do we hit special_merge in vnode partition: ~p~n", [{Partition, Name}]),
     case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
         true ->
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 true ->
                     ok = riak_kv_bitcask_backend:special_merge(default, Name, ModState),
-                    lager:info("Has special merge completed?"),
                     Backends = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, special_merge}),
                     riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),

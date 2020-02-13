@@ -43,7 +43,9 @@ init_worker(VNodeIndex, _Args, _Props) ->
 %% @doc Perform the asynchronous fold operation.
 handle_work({fold, FoldFun, FinishFun}, _Sender, State) ->
     try
-        FinishFun(FoldFun())
+        Resp = FinishFun(FoldFun()),
+            lager:info("Response from worker: ~p~n", [Resp]),
+            Resp
     catch
         throw:receiver_down -> ok;
         throw:stop_fold     -> ok;

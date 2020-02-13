@@ -81,7 +81,13 @@ flush(#buffer{acc=Acc,
               buffer_fun=Fun}=Buffer) ->
     Fun(Acc),
     Buffer#buffer{acc=[],
-                  size=0}.
+                  size=0};
+flush(Buffer) when is_list(Buffer) ->
+    #buffer{buffer_fun = Fun} = hd(Buffer),
+    Acc = [X || #buffer{acc = X} <- Buffer],
+    Fun(lists:flatten(Acc)),
+    [B#buffer{acc=[], size=0} || B <- Buffer].
+
 
 %% @doc Returns the size of the buffer.
 -spec size(buffer()) -> non_neg_integer().
