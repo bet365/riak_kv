@@ -239,6 +239,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                ref=Ref,
                                                root=DataRoot}) ->
     FoldFun = fold_buckets_fun(FoldBucketsFun),
+    FoldOpts = fold_opts_with_filter(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -251,7 +252,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                     {Acc1, _} =
                                         bitcask:fold_keys(Ref1,
                                                           FoldFun,
-                                                          {Acc, sets:new()}),
+                                                          {Acc, sets:new()}, FoldOpts),
                                         Acc1
                                 after
                                     bitcask:close(Ref1)
@@ -263,7 +264,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
             {async, BucketFolder};
         false ->
             {FoldResult, _Bucketset} =
-                bitcask:fold_keys(Ref, FoldFun, {Acc, sets:new()}),
+                bitcask:fold_keys(Ref, FoldFun, {Acc, sets:new()}, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -283,6 +284,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
+    FoldOpts = fold_opts_with_filter(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -291,7 +293,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask:fold_keys(Ref1, FoldFun, Acc)
+                                    bitcask:fold_keys(Ref1, FoldFun, Acc, FoldOpts)
                                 after
                                     bitcask:close(Ref1)
                                 end;
@@ -301,7 +303,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, KeyFolder};
         false ->
-            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc),
+            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -309,6 +311,15 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                     {ok, FoldResult}
             end
     end.
+
+fold_opts_with_filter(Opts) ->
+    case proplists:get_value(ignore_tstamp_expire_keys, Opts, false) of
+        undefined ->
+            [{ignore_tstamp_expire_keys, false} | Opts];
+        _ ->
+            Opts
+    end.
+
 
 %% @doc Fold over all the objects for one or all buckets.
 -spec fold_objects(riak_kv_backend:fold_objects_fun(),
@@ -321,6 +332,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
+    FoldOpts = fold_opts_with_filter(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -329,7 +341,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask:fold(Ref1, FoldFun, Acc)
+                                    bitcask:fold(Ref1, FoldFun, Acc, FoldOpts)
                                 after
                                     bitcask:close(Ref1)
                                 end;
@@ -339,7 +351,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, ObjectFolder};
         false ->
-            FoldResult = bitcask:fold(Ref, FoldFun, Acc),
+            FoldResult = bitcask:fold(Ref, FoldFun, Acc, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
