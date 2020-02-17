@@ -2142,16 +2142,21 @@ update_hashtree(_Bucket, _Key, _RObj, #state{hashtrees=undefined}) ->
 update_hashtree(Bucket, Key, BinObj, State) when is_binary(BinObj) ->
     RObj = riak_object:from_binary(Bucket, Key, BinObj),
     update_hashtree(Bucket, Key, RObj, State);
-update_hashtree(Bucket, Key, RObj, #state{hashtrees=Trees}) ->
+update_hashtree(Bucket, Key, RObj, #state{hashtrees=Trees}=State) ->
     Items = [{object, {Bucket, Key}, RObj}],
-    case get_hashtree_token() of
-        true ->
-            riak_kv_index_hashtree:async_insert(Items, [], Trees),
-            ok;
+    case riak_object:has_expire_time(RObj) of
         false ->
-            riak_kv_index_hashtree:insert(Items, [], Trees),
-            put(hashtree_tokens, max_hashtree_tokens()),
-            ok
+            case get_hashtree_token() of
+                true ->
+                    riak_kv_index_hashtree:async_insert(Items, [], Trees),
+                    ok;
+                false ->
+                    riak_kv_index_hashtree:insert(Items, [], Trees),
+                    put(hashtree_tokens, max_hashtree_tokens()),
+                    ok
+            end;
+        _->
+            delete_from_hashtree(Bucket, Key, State)
     end.
 
 delete_from_hashtree(Bucket, Key, #state{hashtrees=Trees})->
