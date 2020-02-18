@@ -239,7 +239,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                ref=Ref,
                                                root=DataRoot}) ->
     FoldFun = fold_buckets_fun(FoldBucketsFun),
-    FoldOpts = fold_opts_with_filter(Opts),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -284,7 +284,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
-    FoldOpts = fold_opts_with_filter(Opts),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -312,12 +312,12 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
-fold_opts_with_filter(Opts) ->
-    case proplists:get_value(ignore_tstamp_expire_keys, Opts, false) of
-        undefined ->
-            [{ignore_tstamp_expire_keys, false} | Opts];
-        _ ->
-            Opts
+build_bitcask_fold_opts(Opts) ->
+    case lists:member(ignore_deletes_with_expiry, Opts) of
+        true ->
+            [{ignore_tstamp_expire_keys, true}];
+        false ->
+            []
     end.
 
 
@@ -332,7 +332,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
-    FoldOpts = fold_opts_with_filter(Opts),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),

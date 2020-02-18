@@ -608,12 +608,11 @@ hash_index_data(IndexData) when is_list(IndexData) ->
 fold_keys(Partition, HashtreePid, Index, HasIndexTree) ->
     FoldFun = fold_fun(HashtreePid, HasIndexTree),
     {Limit, Wait} = get_build_throttle(),
-    IgnoreTstampExpireKeys = get_ignore_tstamp_expire_keys(),
     Req = riak_core_util:make_fold_req(FoldFun,
                                        {0, {Limit, Wait}}, false,
                                        [aae_reconstruction,
-                                        {ignore_tstamp_expire_keys, IgnoreTstampExpireKeys},
-                                        {iterator_refresh, true}]),
+                                        ignore_deletes_with_expiry,
+                                       {iterator_refresh, true}]),
     Result = riak_core_vnode_master:sync_command({Partition, node()},
                                         Req,
                                         riak_kv_vnode_master, infinity),
@@ -633,13 +632,6 @@ get_build_throttle() ->
     app_helper:get_env(riak_kv,
                        anti_entropy_build_throttle,
                        ?DEFAULT_BUILD_THROTTLE).
-
--define(DEFAULT_AAE_DELETE_EXPIRED, false).
-
-get_ignore_tstamp_expire_keys() ->
-    app_helper:get_env(riak_kv,
-                        anti_entropy_delete_expired,
-                        ?DEFAULT_AAE_DELETE_EXPIRED).
 
 
 maybe_throttle_build(RObjBin, Limit, Wait, Acc) ->
@@ -716,7 +708,7 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
                   [] ->
                       hashtree:new({Index,IdBin}, [{segment_path, Path}]);
                   [{_,Other}|_] ->
-                      hashtree:new({Index,IdBin}, Other, [])
+                      hashtree:new({Index,IdBin}, Other)
                end,
     NewTree1 = case MarkType of
                    mark_empty -> hashtree:mark_open_empty(Id, NewTree0);
