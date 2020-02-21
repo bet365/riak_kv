@@ -1635,8 +1635,8 @@ full_split_test() ->
     Opts = [{data_root, "test/bitcask-backend"}, {max_file_size, 10}],
     {ok, S} = ?MODULE:start(0, Opts),
     {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
-
-    FoldFun = fun(_, Key, Acc) -> [Key | Acc] end,
+ct:pal("Start of fukll split test ####################"),
+    FoldFun = fun(_, Key, Acc) -> ct:pal("FoldFun Key: ~p~n", [Key]), [Key | Acc] end,
 
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
@@ -1680,8 +1680,18 @@ full_split_test() ->
     ?MODULE:special_merge(default, second_split, S1),
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    {error, not_found, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1),
 
+    State = erlang:get(S1#state.ref),
+    ct:pal("State: ~p~n", [State]),
+    OpenInstances = element(2, State),
+    {second_split, BRef, _, _} = lists:keyfind(second_split, 1, OpenInstances),
+    BState = erlang:get(BRef),
+    KeyDir = element(10, BState),
+    {error, not_found, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1),
+    not_found = bitcask_nifs:keydir_get(KeyDir, make_bitcask_key(3, {<<"second_split">>, <<"second_split">>}, <<"k2">>)),
+%%    ct:pal("Does nif get work or not: ~p~n", [NifGet]),
+
+ct:pal("Last call to fold"),
     {ok, Keys4} = ?MODULE:fold_keys(FoldFun, [], [{bucket, <<"second_split">>}], S1),
     ?assertEqual([<<"k1">>, <<"k3">>, <<"k4">>], lists:sort(Keys4)),    %% TODO Check why deleted keys appear again after special merge, could be related to the expiry in the new split
 
