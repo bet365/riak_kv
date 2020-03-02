@@ -289,7 +289,7 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partit
 
 add_split_opts(_Ref, Bucket, Opts, Partition) ->
     case Bucket of
-        undefined ->
+        <<"undefined">> ->
             Opts;
         _ ->
                     check_md(Bucket, Opts, Partition)
@@ -412,7 +412,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          ref=Ref,
                                          root=DataRoot,
                                          partition = Partition}) ->
-    Bucket =  proplists:get_value(bucket, Opts),
+    Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     NewOpts0 = add_split_opts(Bucket, Opts, Partition),
     FoldOpts = build_bitcask_fold_opts(NewOpts0),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
@@ -491,7 +491,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                root=DataRoot,
                                                partition = Partition}) ->
     lager:info("FoldObjects triggered"),
-    Bucket =  proplists:get_value(bucket, Opts),
+    Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
     FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
