@@ -63,8 +63,7 @@
          destroy/1,
          index_2i_n/0,
          get_trees/1,
-         get_version/1,
-         hashtree_itr_filter_expired/3]).
+         get_version/1]).
 
 -export([poke/1,
          get_build_time/1]).
@@ -100,12 +99,6 @@
 %% After traversing Limit bytes, the fold will sleep for Wait milliseconds.
 %% Default: 1 MB limit / 100 ms wait
 -define(DEFAULT_BUILD_THROTTLE, {1000000, 100}).
-
-%% Int byte sizes for small and large int binaries.
--define(SMALL_INT_VER, <<97>>).
--define(LARGE_INT_VER, <<98>>).
--define(SMALL_INT_BYTES, 3).
--define(LARGE_INT_BYTES, 6).
 
 %%%===================================================================
 %%% API
@@ -593,17 +586,7 @@ hash_object({Bucket, Key}, RObj0, Version) ->
             true -> RObj0;
             false -> riak_object:from_binary(Bucket, Key, RObj0)
         end,
-        RObjHash0 = riak_object:hash(RObj, Version),
-        %% Check if the object has an expiry time. If it does, add the epoch to
-        %% the hash. This is matched out in the hashtree and is used to drop hashes
-        %% when the epoch has elapsed. See `hashtree_itr_filter_expired/3`.
-        RObjHash1 = 
-            case riak_object:has_expire_time(RObj) of
-                false -> RObjHash0;
-                ExpireTime ->
-                    <<RObjHash0/binary, ExpireTime:32/integer>>
-            end,
-        RObjHash1
+        riak_object:hash(RObj, Version)
     catch _:_ ->
             Null = erlang:phash2(<<>>),
             term_to_binary(Null)
@@ -628,7 +611,8 @@ fold_keys(Partition, HashtreePid, Index, HasIndexTree) ->
     Req = riak_core_util:make_fold_req(FoldFun,
                                        {0, {Limit, Wait}}, false,
                                        [aae_reconstruction,
-                                        {iterator_refresh, true}]),
+                                        ignore_deletes_with_expiry,
+                                       {iterator_refresh, true}]),
     Result = riak_core_vnode_master:sync_command({Partition, node()},
                                         Req,
                                         riak_kv_vnode_master, infinity),
@@ -648,6 +632,7 @@ get_build_throttle() ->
     app_helper:get_env(riak_kv,
                        anti_entropy_build_throttle,
                        ?DEFAULT_BUILD_THROTTLE).
+
 
 maybe_throttle_build(RObjBin, Limit, Wait, Acc) ->
     ObjSize = byte_size(RObjBin),
@@ -721,11 +706,9 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
     IdBin = tree_id(Id),
     NewTree0 = case Trees of
                   [] ->
-                      Opts = maybe_add_itr_filter_fun(Id),
-                      hashtree:new({Index,IdBin}, [{segment_path, Path}|Opts]);
+                      hashtree:new({Index,IdBin}, [{segment_path, Path}]);
                   [{_,Other}|_] ->
-                      Opts = maybe_add_itr_filter_fun(Id),
-                      hashtree:new({Index,IdBin}, Other, Opts)
+                      hashtree:new({Index,IdBin}, Other)
                end,
     NewTree1 = case MarkType of
                    mark_empty -> hashtree:mark_open_empty(Id, NewTree0);
@@ -733,9 +716,6 @@ do_new_tree(Id, State=#state{trees=Trees, path=Path}, MarkType) ->
                end,
     Trees2 = orddict:store(Id, NewTree1, Trees),
     State#state{trees=Trees2}.
-
-maybe_add_itr_filter_fun(?INDEX_2I_N) -> [];
-maybe_add_itr_filter_fun(_) -> [{itr_filter_fun, fun ?MODULE:hashtree_itr_filter_expired/3}].
 
 %% This function never uses the Type field. Unsure why it is part of the API. Maybe was meant to be used
 %% by the background manager which could manage tokens based on Type atom. Best guess...
@@ -1190,47 +1170,6 @@ maybe_callback(undefined) ->
     ok;
 maybe_callback(Callback) ->
     Callback().
-
-%% Fun that is used in the core hashtree for filtering from the itr when building the 
-%% hashtree. We check the integer version to determine the number of bytes used by
-%% the int, this enables us to check if a given hash has a tstamp for which is
-%% should expire. 
-%%
-%% The riak_object clock is hashed using phash2, which will return an int between 
-%% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
-%% need to know this size so we can match the epoch from the binary (if it has one).
-hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
-    IntSize = int_byte_size(IntVer),
-    <<H:IntSize/binary, Epoch/binary>> = Bin,
-    maybe_filter_expired(K, H, Epoch, TreeState);
-hashtree_itr_filter_expired(K, H, _TreeState) ->
-    [{K,H}].
-
-%% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
-%% to the iterator in hashtree.
-maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
-maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
-    do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
-
-%% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
-%% delete it from the hashtree and return an empty list to exclude it from the 
-%% hashtree itr, which means that it wont be exchanged with other replicas.
-do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
-do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
-    hashtree:delete(K, TreeState),
-    [].
-
-now_epoch() ->
-    {M, S, _} = os:timestamp(),
-    Now = M * 1000000 + S,
-    Now.
-
-%% Determine the size of an int as per its erlang version byte. This can be 3 or
-%% 6 bytes.
-int_byte_size(?SMALL_INT_VER) -> ?SMALL_INT_BYTES;
-int_byte_size(?LARGE_INT_VER) -> ?LARGE_INT_BYTES;
-int_byte_size(X) -> lager:error("Unmatched bytes ~p", [X]).
-
 
 do_update_tree(Id, Callback, From, State) ->
   lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
