@@ -42,6 +42,7 @@
          status/1,
          check_backend_exists/2,
          activate_backend/2,
+         remove_backend/2,
          is_backend_active/2,
          fetch_metadata_backends/1,
          special_merge/3,
@@ -579,6 +580,11 @@ activate_backend(Split, #state{ref = Ref} = State) ->
     lager:info("Bitcask readfiles after wrap: ~p~n", [element(5,B2State2)]),
 
     {ok, State#state{ref = NewRef}}.
+
+remove_backend(Split, #state{ref = Ref} = State) ->
+    NewRef = bitcask_manager:close(Ref, Split),
+    {ok, State#state{ref = NewRef}}.
+
 
 is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).

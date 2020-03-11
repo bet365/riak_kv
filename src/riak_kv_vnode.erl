@@ -48,6 +48,7 @@
          repair_filter/1,
          update_metadata/2,
          add_split_backend/2,
+         remove_split_backend/2,
          activate_split_backend/2,
          special_merge/2,
          hashtree_pid/1,
@@ -674,6 +675,12 @@ add_split_backend(Name, Partition) ->
         riak_kv_vnode_master,
         infinity).
 
+remove_split_backend(Name, Partition) ->
+    riak_core_vnode_master:sync_command({Partition, node()},
+        {remove_split_backend, Partition, Name},
+        riak_kv_vnode_master,
+        infinity).
+
 activate_split_backend(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {activate_split_backend, Partition, Name},
@@ -969,9 +976,28 @@ handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModSt
                     riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, false} | Backends], [{propagate, false}]),
                     {reply, ok, NewState}
             end;
-        true ->
+        true -> %% TODO If backend exists but is not in the metadata should we add it or not?
             lager:debug("Vnode attempted to start a split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Name}, ModState]),
             {reply, ok, State}
+    end;
+
+%% TODO Complete this call
+handle_command({remove_split_backend, _Partition, Name}, _, #state{modstate = ModState} = State) ->
+    case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+        false ->
+            lager:error("Vnode attempted to remove a backend: ~p which does not exist in ModState: ~p~n", [Name, ModState]),
+            {reply, error, State};
+        true ->
+            {ok, NewModState} = riak_kv_bitcask_backend:remove_backend(Name, ModState),
+            NewState = State#state{modstate = NewModState},
+            case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+                true ->
+                    lager:error("Failed to remove backend: ~p from ModState: ~p during removal process", [Name, NewModState]),
+                    {reply, error, State};
+                false ->
+                    riak_core_metadata:delete({split_backend, splits}, {Name, node()}),
+                    {reply, ok, NewState}
+            end
     end;
 
 handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = ModState} = State) ->
