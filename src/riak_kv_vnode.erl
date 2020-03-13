@@ -50,7 +50,9 @@
          add_split_backend/2,
          remove_split_backend/2,
          activate_split_backend/2,
+         deactivate_split_backend/2,
          special_merge/2,
+         reverse_merge/2,
          hashtree_pid/1,
          rehash/3,
          refresh_index_data/4,
@@ -687,9 +689,21 @@ activate_split_backend(Name, Partition) ->
         riak_kv_vnode_master,
         infinity).
 
+deactivate_split_backend(Name, Partition) ->
+    riak_core_vnode_master:sync_command({Partition, node()},
+        {deactivate_split_backend, Partition, Name},
+        riak_kv_vnode_master,
+        infinity).
+
 special_merge(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {special_merge, Partition, Name},
+        riak_kv_vnode_master,
+        infinity).
+
+reverse_merge(Name, Partition) ->
+    riak_core_vnode_master:sync_command({Partition, node()},
+        {reverse_merge, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
@@ -977,7 +991,7 @@ handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModSt
                     {reply, ok, NewState}
             end;
         true -> %% TODO If backend exists but is not in the metadata should we add it or not?
-            lager:debug("Vnode attempted to start a split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to start a split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Name}, ModState]),
             {reply, ok, State}
     end;
 
@@ -1005,7 +1019,7 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
         true ->
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 true ->
-                    lager:debug("Vnode split backend: ~p is already active in ModState: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is already active in ModState: ~p~n", [{Partition, Name}, ModState]),
                     {reply, ok, State};  %% TODO Review if this should return error or not?
                 false ->
                     case riak_kv_bitcask_backend:activate_backend(Name, ModState) of
@@ -1026,7 +1040,37 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
                     end
             end;
         false ->
-            lager:debug("Vnode attempted to activate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to activate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            {reply, error, State}
+    end;
+
+handle_command({deactivate_split_backend, Partition, Name}, _, #state{modstate  = ModState} = State) ->
+    case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+        true ->
+            case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
+                false ->
+                    lager:info("Vnode split backend: ~p is not in active state in ModState: ~p~n", [{Partition, Name}, ModState]),
+                    {reply, ok, State};  %% TODO Review if this should return error or not?
+                true ->
+                    case riak_kv_bitcask_backend:deactivate_backend(Name, ModState) of
+                        {ok, NewModState} ->
+                            NewState = State#state{modstate = NewModState},
+                            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                                undefined ->
+                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, false}], [{propagate, false}]),
+                                    {reply, ok, NewState};
+                                Backends ->
+                                    NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, false}),
+                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                                    {reply, ok, NewState}
+                            end;
+                        Error ->
+                            lager:error("Could not activate backend: ~p due to error: ~p~n", [Name, Error]),
+                            {reply, error, State}
+                    end
+            end;
+        false ->
+            lager:info("Vnode attempted to deactivate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
             {reply, error, State}
     end;
 
@@ -1041,11 +1085,31 @@ handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState}
                     riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
                     {reply, ok, State};
                 false ->
-                    lager:debug("Vnode split backend: ~p is not active so cannot be special merged: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is not active so cannot be special merged: ~p~n", [{Partition, Name}, ModState]),
                     {reply, error, State}
             end;
         false ->
-            lager:debug("Vnode attempted to activate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to sepcial_merge a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            {reply, error, State}
+    end;
+
+%% This will merge data from a split back into the default location then close and remove the split bitcask instance. Finally removing it from metadata too
+handle_command({reverse_merge, Partition, Name}, _, #state{modstate  = ModState} = State) ->
+    case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+        true ->
+            case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
+                false ->
+                    ok = riak_kv_bitcask_backend:reverse_merge(Name, default, ModState),
+                    Backends = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    NewBackends = lists:keydelete(Partition, 1, Backends),
+                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                    {reply, ok, State};
+                true ->
+                    lager:info("Vnode split backend: ~p is in active state so it can not be reverse merged back to default location: ~p~n", [{Partition, Name}, ModState]),
+                    {reply, error, State}
+            end;
+        false ->
+            lager:info("Vnode attempted to activate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
             {reply, error, State}
     end;
 

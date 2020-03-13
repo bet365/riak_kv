@@ -42,10 +42,12 @@
          status/1,
          check_backend_exists/2,
          activate_backend/2,
+         deactivate_backend/2,
          remove_backend/2,
          is_backend_active/2,
          fetch_metadata_backends/1,
          special_merge/3,
+         reverse_merge/3,
          callback/3]).
 
 -export([data_size/1,
@@ -581,6 +583,10 @@ activate_backend(Split, #state{ref = Ref} = State) ->
 
     {ok, State#state{ref = NewRef}}.
 
+deactivate_backend(Split, #state{ref = Ref} = State) ->
+    NewRef = bitcask_manager:deactivate_split(Ref, Split),
+    {ok, State#state{ref = NewRef}}.
+
 remove_backend(Split, #state{ref = Ref} = State) ->
     NewRef = bitcask_manager:close(Ref, Split),
     {ok, State#state{ref = NewRef}}.
@@ -637,7 +643,18 @@ special_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
             lager:error("One or more of the backends scheduled for special_merge do not exist: ~p and ~p~n", [Split1, Split2])
     end.
 
-
+reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
+    case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
+        {true, true} ->
+            case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
+                {false, true} ->
+                    bitcask_manager:reverse_merge(Ref, Split1, Split2, Opts);
+                States ->
+                    lager:error("One of the backends is not in the correct active state for reverse merge, Expected: {false, true}, Actual: ~p for backends: ~p~n", [States, {Split1, Split2}])
+            end;
+        _ ->
+            lager:error("One of the backends scheduled for reverse merge does not exist, backends: ~p~n", [Split1, Split2])
+    end.
 
 %% @doc Get the size of the bitcask backend (in number of keys)
 -spec data_size(state()) -> undefined | {non_neg_integer(), objects}.
