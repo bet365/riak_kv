@@ -153,7 +153,7 @@ start(Partition, Config0) ->
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
-                    BitcaskOpts1 = [{find_split_fun, fun find_split/1}, {upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
+                    BitcaskOpts1 = [{upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
                     Backends =
                         case proplists:get_value(start_md_backends, Config, true) of
                             true ->

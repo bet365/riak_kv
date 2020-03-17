@@ -1100,10 +1100,17 @@ handle_command({reverse_merge, Partition, Name}, _, #state{modstate  = ModState}
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 false ->
                     ok = riak_kv_bitcask_backend:reverse_merge(Name, default, ModState),
-                    Backends = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
-                    NewBackends = lists:keydelete(Partition, 1, Backends),
-                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
-                    {reply, ok, State};
+                    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                        [] ->
+                            riak_core_metadata:delete({split_backend, splits}, {Name, node()}),
+                            {reply, ok, State};
+                        undefined ->
+                            {reply, ok, State};
+                        Backends ->
+                            NewBackends = lists:keydelete(Partition, 1, Backends),
+                            riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                            {reply, ok, State}
+                    end;
                 true ->
                     lager:info("Vnode split backend: ~p is in active state so it can not be reverse merged back to default location: ~p~n", [{Partition, Name}, ModState]),
                     {reply, error, State}

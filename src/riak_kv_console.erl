@@ -1018,71 +1018,58 @@ reverse_merge_local(Name) ->
     Partitions = riak_core_ring:my_indices(R),
     case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
         undefined ->
-            io:format("Backend: ~p does not exist so cannot be special_merged~n", [Name]),
+            io:format("Backend: ~p does not exist so cannot be reverse_merged~n", [Name]),
             error;
         BackendStatus when length(BackendStatus) =:= length(Partitions) ->
-            Responses = lists:foldl(
-                fun(Partition, Acc) ->
-                    case riak_kv_vnode:special_merge(Name, Partition) of
-                        ok ->
-                            [ok | Acc];
-                        _ ->
-                            Acc
-                    end
-                end, [], Partitions),
-            RLength = length(Responses),
+%%            _Responses = lists:foldl(
+%%                fun(Partition, Acc) ->
+%%                    case riak_kv_vnode:reverse_merge(Name, Partition) of
+%%                        ok ->
+%%                            [ok | Acc];
+%%                        _ ->
+%%                            Acc
+%%                    end
+%%                end, [], Partitions),
+            [riak_kv_vnode:reverse_merge(Name, Partition) || Partition <- Partitions],
             case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
                 undefined ->
-                    io:format("Backend: ~p attempted to be special_merge but is no longer in metadata please investigate~n", [Name]),
-                    error;
-                BackendStatus1 when length(BackendStatus1) =:= RLength ->
-                    ActiveStates = [{Partition, State} || {Partition, State} <- BackendStatus1, State =:= special_merge],
-                    case length(ActiveStates) of
-                        RLength ->
-                            io:format("Backend: ~p has been succesfully special_merge on each partition of this node~n", [Name]),
-                            ok;
-                        _ ->
-                            io:format("Backend: ~p could not be special_merge on every partition, please investigate~n", [Name]),
-                            error
-                    end;
+                    io:format("Backend: ~p was succesfully reverse merged on all partitions and removed as a split backend~n", [Name]),
+                    ok;
                 _ ->
-                    io:format("There is a discrepancy between the number of partition backends in metadata and succesful responses from special_merge partitions, please investigate. Backend: ~p", [Name]),
+                    io:format("The backend: ~p still exists in metadata when it should have been removed. It may still exist in bitcask, please investigate", [Name]),
                     error
-            end;
-        _ -> %% TODO Review if we should still go ahead and activate those that do exist or wait for all partitions to be in sync and have the backend
-            io:format("Backend: ~p has not been added on every partition for this node so cannot be activated for all partitions~n", [Name]),
-            error
+            end
     end.
 
 reverse_merge_local(Name, Partition) ->
     case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
         undefined ->
-            io:format("Backend: ~p does not exist on this node so cannot be special merged~n", [Name]),
+            io:format("Backend: ~p does not exist on this node so cannot be reverse_merged~n", [Name]),
             error;
         BackendStatus ->
             case lists:keyfind(Partition, 1, BackendStatus) of
                 false ->
-                    io:format("Backend: ~p does not exist  on Partition: ~p so cannot be special_merged~n", [Name, Partition]),
+                    io:format("Backend: ~p does not exist on Partition: ~p so cannot be reverse_merged~n", [Name, Partition]),
                     error;
-                {Partition, false} ->
-                    io:format("Backend: ~p has not yet been activated on Partition: ~p so cannot be special_merged", [Name, Partition]),
-                    ok;
                 {Partition, special_merge} ->
-                    io:format("Backend ~p has already been special_merged on this Partition: ~p~n", [Name, Partition]),
+                    io:format("Backend ~p  on partition: ~p state is 'special_merge' it must be deactivated before it can be reverse merged", [Name, Partition]),
                     ok;
                 {Partition, active} ->
-                    ok = riak_kv_vnode:special_merge(Name, Partition),
+                    io:format("Backend ~p  on partition: ~p state is 'active' it must be deactivated before it can be reverse merged", [Name, Partition]),
+                    ok;
+                {Partition, false} ->
+                    ok = riak_kv_vnode:reverse_merge(Name, Partition),
                     BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
                     case lists:keyfind(Partition, 1, BackendStatus1) of
-                        false ->
-                            io:format("Failed to special_merge backend: ~p Please investigate", [Name]),
-                            error;
                         {Partition, special_merge} ->
-                            io:format("Succesfully special_merged backend: ~p on this Partition: ~p~n", [Name, Partition]),
+                            io:format("Failed to reverse_merge backend: ~p  its still in 'special_merge' state. Please investigate", [Name]),
+                            error;
+                        false ->
+                            io:format("Succesfully reverse_merged backend: ~p on this Partition: ~p~n", [Name, Partition]),
                             ok;
                         _ ->
                             io:format("Backend is in wrong state after activation, investigate what has happened.~n"),
-                            ok
+                            error
                     end
             end
     end.
