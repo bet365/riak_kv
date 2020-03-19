@@ -944,7 +944,7 @@ fold_buckets_fun(FoldBucketsFun) ->
 
 %% @private
 %% Return a function to fold over keys on this backend
-fold_keys_fun(FoldKeysFun, undefined) ->
+fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         lager:info("fold_keys_fun make key: ~p~n", [make_riak_key(BK)]),
         case make_riak_key(BK) of
@@ -977,7 +977,7 @@ fold_keys_fun(FoldKeysFun, Bucket) ->
 
 %% @private
 %% Return a function to fold over keys on this backend
-fold_objects_fun(FoldObjectsFun, undefined) ->
+fold_objects_fun(FoldObjectsFun, <<"undefined">>) ->
     fun(BK, Value, Acc) ->
             case make_riak_key(BK) of
                 {_S, Bucket, Key} ->
