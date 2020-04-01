@@ -1191,39 +1191,19 @@ maybe_callback(undefined) ->
 maybe_callback(Callback) ->
     Callback().
 
-%% Fun that is used in the core hashtree for filtering from the itr when building the 
-%% hashtree. We check the integer version to determine the number of bytes used by
-%% the int, this enables us to check if a given hash has a tstamp for which is
-%% should expire. 
-%%
-%% The riak_object clock is hashed using phash2, which will return an int between 
-%% 0..(2^31)-1, when converted to a binary, this could be either 3 or 6 bytes. We
-%% need to know this size so we can match the epoch from the binary (if it has one).
+
+%% Changed to mimic behaviour of 2.2.12
+%% This will filter out all keys with an expiry in it
+%% Which provides compatible behaviour to 2.2.12, as that issues hashtree deletes at the time of receiving the delete
 hashtree_itr_filter_expired(<<$t, _/binary>> = K, <<_:1/binary, IntVer:1/binary, _/binary>> = Bin, TreeState) ->
-    IntSize = int_byte_size(IntVer),
-    <<H:IntSize/binary, Epoch/binary>> = Bin,
-    maybe_filter_expired(K, H, Epoch, TreeState);
+  IntSize = int_byte_size(IntVer),
+  <<H:IntSize/binary, Epoch/binary>> = Bin,
+  maybe_filter_expired(K, H, Epoch, TreeState);
 hashtree_itr_filter_expired(K, H, _TreeState) ->
-    [{K,H}].
+  [{K,H}].
 
-%% The epoch is an empty binary -- this hash doesnt have an expiry. Just return the KV
-%% to the iterator in hashtree.
 maybe_filter_expired(K, H, <<>>, _TreeState) -> [{K, H}];
-maybe_filter_expired(K, H, <<Epoch:32/integer>>, TreeState) ->
-    do_filter_expired(K, H, Epoch, TreeState, now_epoch()).
-
-%% If the epoch hasnt been hit yet, the KV is still valid, return it. Otherwise, 
-%% delete it from the hashtree and return an empty list to exclude it from the 
-%% hashtree itr, which means that it wont be exchanged with other replicas.
-do_filter_expired(K, H, Epoch, _TreeState, Now) when Now < Epoch -> [{K, H}];
-do_filter_expired(K, _H, _Epoch, TreeState, _Now) ->
-    hashtree:delete(K, TreeState),
-    [].
-
-now_epoch() ->
-    {M, S, _} = os:timestamp(),
-    Now = M * 1000000 + S,
-    Now.
+maybe_filter_expired(_K, _H, _, _TreeState) -> [].
 
 %% Determine the size of an int as per its erlang version byte. This can be 3 or
 %% 6 bytes.
