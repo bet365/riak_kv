@@ -295,7 +295,7 @@ add_split_opts(_Ref, Bucket, Opts, Partition) ->
         <<"undefined">> ->
             Opts;
         _ ->
-                    check_md(Bucket, Opts, Partition)
+            check_md(Bucket, Opts, Partition)
     end.
 
 -ifdef(TEST).
@@ -1493,7 +1493,7 @@ split_data_test() ->
 
 special_merge_test() ->
     os:cmd("rm -rf test/bitcask-backend/*"),
-    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    Opts = [{data_root, "test/bitcask-backend"}, {tombstone_version, 2}],
     {ok, S} = ?MODULE:start(0, Opts),
     {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
 
@@ -1562,7 +1562,7 @@ split_merge_test() ->
     timer:sleep(2000),
 
     {ok, AfterMerge} = file:list_dir("test/bitcask-backend/0/default"),
-    ?assert(AfterMerge < BeforeMerge),
+    ?assert(length(AfterMerge) < length(BeforeMerge)),
 
     ok = stop(S1),
     os:cmd("rm -rf test/bitcask-backend/*").
@@ -1647,7 +1647,7 @@ full_split_test() ->
     TstampExpire = bitcask_time:tstamp() - 1000,
     {ok, S} = ?MODULE:start(0, Opts),
     {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
-    FoldFun = fun(_, Key, Acc) -> ct:pal("FoldFun Key: ~p~n", [Key]), [Key | Acc] end,
+    FoldFun = fun(_, Key, Acc) -> [Key | Acc] end,
 
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
@@ -1701,6 +1701,22 @@ full_split_test() ->
 
     {ok, Keys4} = ?MODULE:fold_keys(FoldFun, [], [{bucket, <<"second_split">>}], S1),
     ?assertEqual([<<"k1">>, <<"k3">>, <<"k4">>], lists:sort(Keys4)),
+
+    ?MODULE:deactivate_backend(second_split, S1),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ?MODULE:reverse_merge(second_split, default, S1),
+
+    {ok, <<"v1">>, _} = ?MODULE:get(<<"b1">>, <<"k1">>, S1),
+    {ok, <<"v2">>, _} = ?MODULE:get(<<"b1">>, <<"k2">>, S1),
+    {ok, <<"v1">>, _} = ?MODULE:get(<<"second_split">>, <<"k1">>, S1),
+%%    {ok, <<"v2">>, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1),
+    {ok, <<"v3">>, _} = ?MODULE:get(<<"second_split">>, <<"k3">>, S1),
+    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1),
+
+    {ok, Keys5} = ?MODULE:fold_keys(FoldFun, [], [{bucket, <<"second_split">>}], S1),
+    ct:pal("Keys: ~p~n", [Keys4]),
+    ?assertEqual([<<"k1">>, <<"k3">>, <<"k4">>], lists:sort(Keys5)),
 
     ok = stop(S1),
     os:cmd("rm -rf test/bitcask-backend/*").
