@@ -84,11 +84,12 @@
 -define(VERSION_3, 3).
 
 -define(CURRENT_VERSION, ?VERSION_3).
--define(ENCODE_DISK_KEY_FUN, fun encode_disk_key/2).
--define(DECODE_DISK_KEY_FUN, fun decode_disk_key/1).
--define(ENCODE_BITCASK_KEY,  fun make_bitcask_key/3).
--define(DECODE_BITCASK_KEY,  fun make_riak_key/1).
--define(FIND_SPLIT_FUN,      fun find_split/1).
+-define(ENCODE_DISK_KEY_FUN,        fun encode_disk_key/2).
+-define(DECODE_DISK_KEY_FUN,        fun decode_disk_key/1).
+-define(ENCODE_BITCASK_KEY,         fun make_bitcask_key/3).
+-define(DECODE_BITCASK_KEY,         fun make_riak_key/1).
+-define(FIND_SPLIT_FUN,             fun find_split/1).
+-define(CHECK_AND_UPGRADE_KEY_FUN,  fun check_and_upgrade_key/2).
 
 -record(state, {ref :: reference() | undefined,
                 data_dir :: string(),
@@ -130,11 +131,12 @@ start(Partition, Config0) ->
     BaseConfig = proplists:delete(small_keys, Config0),
     KeyOpts =
         [
-            {encode_disk_key_fun, ?ENCODE_DISK_KEY_FUN},
-            {decode_disk_key_fun, ?DECODE_DISK_KEY_FUN},
-            {encode_riak_key,     ?ENCODE_BITCASK_KEY},
-            {decode_riak_key,     ?DECODE_BITCASK_KEY},
-            {find_split_fun,      ?FIND_SPLIT_FUN}
+            {encode_disk_key_fun,       ?ENCODE_DISK_KEY_FUN},
+            {decode_disk_key_fun,       ?DECODE_DISK_KEY_FUN},
+            {encode_riak_key,           ?ENCODE_BITCASK_KEY},
+            {decode_riak_key,           ?DECODE_BITCASK_KEY},
+            {find_split_fun,            ?FIND_SPLIT_FUN},
+            {check_and_upgrade_key_fun, ?CHECK_AND_UPGRADE_KEY_FUN}
         ],
     Config = BaseConfig ++ KeyOpts,
     KeyVsn = ?CURRENT_VERSION,
@@ -153,7 +155,7 @@ start(Partition, Config0) ->
                     BitcaskDir = filename:join(DataRoot, DataDir),
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
-                    BitcaskOpts1 = [{upgrade_key, true}, {check_and_upgrade_key_fun, fun check_and_upgrade_key/2} | BitcaskOpts],
+                    BitcaskOpts1 = [{upgrade_key, true} | BitcaskOpts],
                     Backends =
                         case proplists:get_value(start_md_backends, Config, true) of
                             true ->
@@ -1710,7 +1712,6 @@ full_split_test() ->
     {ok, <<"v1">>, _} = ?MODULE:get(<<"b1">>, <<"k1">>, S1),
     {ok, <<"v2">>, _} = ?MODULE:get(<<"b1">>, <<"k2">>, S1),
     {ok, <<"v1">>, _} = ?MODULE:get(<<"second_split">>, <<"k1">>, S1),
-%%    {ok, <<"v2">>, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1),
     {ok, <<"v3">>, _} = ?MODULE:get(<<"second_split">>, <<"k3">>, S1),
     {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1),
 
