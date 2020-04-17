@@ -88,7 +88,7 @@
 -define(DECODE_DISK_KEY_FUN,        fun decode_disk_key/1).
 -define(ENCODE_BITCASK_KEY,         fun make_bitcask_key/3).
 -define(DECODE_BITCASK_KEY,         fun make_riak_key/1).
--define(FIND_SPLIT_FUN,             fun find_split/1).
+-define(FIND_SPLIT_FUN,             fun find_split/2).
 -define(CHECK_AND_UPGRADE_KEY_FUN,  fun check_and_upgrade_key/2).
 
 -record(state, {ref :: reference() | undefined,
@@ -321,7 +321,9 @@ check_md(Bucket, Opts, Partition) ->
 -endif.
 
 -ifdef(TEST).
-get_split(<<"second_split">>, _, _) ->
+get_split(<<"second_split">>, _, 0) ->
+    <<"default">>;
+get_split(<<"second_split">>, _, 1) ->
     <<"second_split">>;
 get_split(_, _, _) ->
     <<"default">>.
@@ -336,16 +338,30 @@ get_split(Bucket, Key, Partition) ->
                     case lists:keyfind(Partition, 1, BackendStates) of
                         false ->
                             <<"default">>;
-                        {Partition, _State} ->
-                            Key
+                        {Partition, State} ->
+                            case State of
+                                active ->
+                                    Key;
+                                special_merge ->
+                                    Key;
+                                _ ->
+                                    <<"default">>
+                            end
                     end
             end;
         BackendStates ->
             case lists:keyfind(Partition, 1, BackendStates) of
                 false ->
                     <<"default">>;
-                {Partition, _State} ->
-                    Bucket
+                {Partition, State} ->
+                    case State of
+                        active ->
+                            Bucket;
+                        special_merge ->
+                            Bucket;
+                        _ ->
+                            <<"default">>
+                    end
             end
     end.
 -endif.
@@ -632,12 +648,13 @@ iterate(Itr, Acc, Partition) ->
 -endif.
 
 
-special_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
+special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
             case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
                 {true, true} ->
-                    bitcask_manager:special_merge(Ref, Split1, Split2, Opts);
+                    Opts1 = [{partition, Partition} | Opts],
+                    bitcask_manager:special_merge(Ref, Split1, Split2, Opts1);
                 _ ->
                     lager:error("One or more of the backends scheduled for special_merge are not active: ~p and ~p~n", [Split1, Split2])
             end;
@@ -645,12 +662,13 @@ special_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
             lager:error("One or more of the backends scheduled for special_merge do not exist: ~p and ~p~n", [Split1, Split2])
     end.
 
-reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref} = State) ->
+reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
             case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
                 {false, true} ->
-                    bitcask_manager:reverse_merge(Ref, Split1, Split2, Opts);
+                    Opts1 = [{partition, Partition} | Opts],
+                    bitcask_manager:reverse_merge(Ref, Split1, Split2, Opts1);
                 States ->
                     lager:error("One of the backends is not in the correct active state for reverse merge, Expected: {false, true}, Actual: ~p for backends: ~p~n", [States, {Split1, Split2}])
             end;
@@ -843,8 +861,8 @@ encode_disk_key(<<?VERSION_1:7, _Rest/bits>> = BitcaskKey, _Opts) ->
 encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey.
 
-
-find_split(Key) ->
+%% TODO Needs updating to check against metadata!! Because all keys before a split is added will use default as the split name
+find_split(Key, undefined) ->
     case make_riak_key(Key) of
         {Split, {_Type, _Bucket}, _Key} ->
             binary_to_atom(Split, latin1);
@@ -856,10 +874,28 @@ find_split(Key) ->
             binary_to_atom(Bucket, latin1);
         _ ->
             default
+    end;
+find_split(Key, Partition) when is_integer(Partition) ->
+    case make_riak_key(Key) of
+        {_Split, {_Type, Bucket}, _Key} ->
+            Split1 = get_split(Bucket, Key, Partition),
+            binary_to_atom(Split1, latin1);
+        {Split, Bucket, Key} ->
+            Split1 = get_split(Bucket, Key, Partition),
+            lager:info("Find Split. Decoded: ~p vs MDreturned State: ~p~n", [Split, Split1]),
+            binary_to_atom(Split1, latin1);
+        {{_Type, Bucket}, Key} ->
+            Split1 = get_split(Bucket, Key, Partition),
+            binary_to_atom(Split1, latin1);
+        {Bucket, Key} ->
+            Split1 = get_split(Bucket, Key, Partition),
+            binary_to_atom(Split1, latin1);
+        _ ->
+            default
     end.
 
-check_and_upgrade_key(default, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
-    KeyDirKey;
+%%check_and_upgrade_key(default, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
+%%    KeyDirKey;
 check_and_upgrade_key(Split, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
     case ?DECODE_BITCASK_KEY(KeyDirKey) of
         {{Bucket, Type}, Key} ->
@@ -867,8 +903,18 @@ check_and_upgrade_key(Split, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Ve
         {Bucket, Key} ->
             ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split, latin1)}, Key)
     end;
-check_and_upgrade_key(_Split, <<?VERSION_3:7, _Rest/bitstring>> = KeyDirKey) ->
-    KeyDirKey;
+check_and_upgrade_key(Split0, <<?VERSION_3:7, _Rest/bitstring>> = KeyDirKey) ->
+    case ?DECODE_BITCASK_KEY(KeyDirKey) of
+        {Split0, {_Type, _Bucket}, _Key} ->
+            KeyDirKey;
+        {_Split1, {Type, Bucket}, Key} ->
+            ?ENCODE_BITCASK_KEY(3, {Type, Bucket, atom_to_binary(Split0, latin1)}, Key);
+        {Split0, _Bucket, _Key} ->
+            KeyDirKey;
+        {Split1, Bucket, Key} ->
+            lager:info("Upgrade fun, Decoded split: ~p and split to encode with: ~p~n", [Split1, atom_to_binary(Split0, latin1)]),
+            ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split0, latin1)}, Key)
+    end;
 check_and_upgrade_key(_Split, KeyDirKey) ->
     KeyDirKey.
 
@@ -959,6 +1005,7 @@ fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         lager:info("fold_keys_fun make222 key: ~p~n", [make_riak_key(BK)]),
+        ct:pal("fold_keys_fun make222 key: ~p and bucket: ~p~n", [make_riak_key(BK), Bucket]),
         case make_riak_key(BK) of
             {_S, B, Key} ->
                 case B =:= Bucket of
@@ -1570,6 +1617,7 @@ split_merge_test() ->
     os:cmd("rm -rf test/bitcask-backend/*").
 
 split_fold_keys_test() ->
+    ct:pal("########################### Split_FOLD_KEYS_TEST ##################"),
     os:cmd("rm -rf test/bitcask-backend/*"),
     Opts = [{data_root, "test/bitcask-backend"}, {}],
     {ok, S} = ?MODULE:start(0, Opts),
@@ -1629,7 +1677,8 @@ split_fold_keys_test() ->
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys2)),
 
-    ok = ?MODULE:special_merge(default, second_split, S1),
+    S2 = S1#state{partition = 1}, %% Hack for the get_split function instead of calling into actual metadata
+    ok = ?MODULE:special_merge(default, second_split, S2),
 
     {async, AsyncBuff3} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
     {ok, Buff3} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
