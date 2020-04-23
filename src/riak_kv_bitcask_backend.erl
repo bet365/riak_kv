@@ -875,9 +875,9 @@ find_split(Key, undefined) ->
         _ ->
             default
     end;
-find_split(Key, Partition) when is_integer(Partition) ->
-    case make_riak_key(Key) of
-        {_Split, {_Type, Bucket}, _Key} ->
+find_split(Key0, Partition) when is_integer(Partition) ->
+    case make_riak_key(Key0) of
+        {_Split, {_Type, Bucket}, Key} ->
             Split1 = get_split(Bucket, Key, Partition),
             binary_to_atom(Split1, latin1);
         {Split, Bucket, Key} ->
@@ -1478,7 +1478,7 @@ key_version_test() ->
                    {<<"b5">>, <<"k1">>}
                   ],
                   L).
-
+%% In the below tests when the state is updated to alter the partition number to 1 this is mock a call to md to return the correct split.
 create_new_split_test() ->
     os:cmd("rm -rf test/bitcask-backend/*"),
     Opts = [{data_root, "test/bitcask-backend"}, {}],
@@ -1530,8 +1530,8 @@ split_data_test() ->
     ?MODULE:activate_backend(second_split, S1),
     ?assertEqual(true, is_backend_active(second_split, S1)),
 
-    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1),
-    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1#state{partition = 1}),
+    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1#state{partition = 1}),
 
     {ok, SplitFiles} = file:list_dir("test/bitcask-backend/0/second_split"),
 
@@ -1565,7 +1565,7 @@ special_merge_test() ->
     ?assertEqual(["default", "second_split"], Dirs),
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    ?MODULE:special_merge(default, second_split, S1),
+    ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
 
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
@@ -1597,13 +1597,16 @@ split_merge_test() ->
     ?assertEqual(["default", "second_split"], Dirs),
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    ?MODULE:put(<<"second_split">>, <<"k1">>, [], <<"v1">>, S1),
-    ?MODULE:put(<<"second_split">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k1">>, [], <<"v1">>, S1#state{partition = 1}),
+    ?MODULE:put(<<"second_split">>, <<"k2">>, [], <<"v2">>, S1#state{partition = 1}),
 
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     {ok, BeforeMerge} = file:list_dir("test/bitcask-backend/0/default"),
     BRef = S1#state.ref,
+
+    false = bitcask_manager:needs_merge(BRef),
+    ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
     {true, MFiles} = bitcask_manager:needs_merge(BRef),
 
     BitcaskRoot = filename:join(S1#state.root, S1#state.data_dir),
@@ -1665,8 +1668,8 @@ split_fold_keys_test() ->
     ?MODULE:activate_backend(second_split, S1),
     ?assertEqual(true, is_backend_active(second_split, S1)),
 
-    ?MODULE:put(<<"second_split">>, <<"k5">>, [], <<"v1">>, S1),
-    ?MODULE:put(<<"second_split">>, <<"k6">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k5">>, [], <<"v1">>, S1#state{partition = 1}),
+    ?MODULE:put(<<"second_split">>, <<"k6">>, [], <<"v2">>, S1#state{partition = 1}),
 
     {async, AsyncBuff2} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
     {ok, Buff2} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
@@ -1677,8 +1680,7 @@ split_fold_keys_test() ->
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys2)),
 
-    S2 = S1#state{partition = 1}, %% Hack for the get_split function instead of calling into actual metadata
-    ok = ?MODULE:special_merge(default, second_split, S2),
+    ok = ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
 
     {async, AsyncBuff3} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
     {ok, Buff3} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
@@ -1728,18 +1730,18 @@ full_split_test() ->
 
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v3">>, S1),
-    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v3">>, S1#state{partition = 1}),
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1#state{partition = 1}),
 
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    {ok, <<"v3">>, _} = ?MODULE:get(<<"second_split">>, <<"k3">>, S1),
-    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1),
+    {ok, <<"v3">>, _} = ?MODULE:get(<<"second_split">>, <<"k3">>, S1#state{partition = 1}),
+    {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S1#state{partition = 1}),
 
     {ok, Keys3} = ?MODULE:fold_keys(FoldFun, [], [{bucket, <<"second_split">>}], S1),
     ?assertEqual([<<"k1">>, <<"k3">>, <<"k4">>], lists:sort(Keys3)),
 
-    ?MODULE:special_merge(default, second_split, S1),
+    ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     State = erlang:get(S1#state.ref),
@@ -1747,7 +1749,7 @@ full_split_test() ->
     {second_split, BRef, _, _} = lists:keyfind(second_split, 1, OpenInstances),
     BState = erlang:get(BRef),
     KeyDir = element(10, BState),
-    {error, not_found, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1),
+    {error, not_found, _} = ?MODULE:get(<<"second_split">>, <<"k2">>, S1#state{partition = 1}),
     not_found = bitcask_nifs:keydir_get(KeyDir, make_bitcask_key(3, {<<"second_split">>, <<"second_split">>}, <<"k2">>)),
 
     {ok, Keys4} = ?MODULE:fold_keys(FoldFun, [], [{bucket, <<"second_split">>}], S1),
@@ -1756,7 +1758,7 @@ full_split_test() ->
     ?MODULE:deactivate_backend(second_split, S1),
     ?assertEqual(false, is_backend_active(second_split, S1)),
 
-    ?MODULE:reverse_merge(second_split, default, S1),
+    ?MODULE:reverse_merge(second_split, default, S1),   %% Don't change partition here so default is returned imitating what MD would return due to inactive split state
 
     {ok, <<"v1">>, _} = ?MODULE:get(<<"b1">>, <<"k1">>, S1),
     {ok, <<"v2">>, _} = ?MODULE:get(<<"b1">>, <<"k2">>, S1),
