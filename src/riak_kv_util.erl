@@ -48,11 +48,10 @@
          get_write_once/1,
          overload_reply/1,
          get_backend_config/3,
-         is_modfun_allowed/2]).
-
--export([report_hashtree_tokens/0, reset_hashtree_tokens/2,
          is_modfun_allowed/2,
          backend_reap_mode/1]).
+
+-export([report_hashtree_tokens/0, reset_hashtree_tokens/2]).
 
 -include_lib("riak_kv_vnode.hrl").
 

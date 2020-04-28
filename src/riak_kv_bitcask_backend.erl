@@ -114,7 +114,7 @@ capabilities(_, _) ->
 %% @doc Start the bitcask backend
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config0) ->
-    random:seed(os:timestamp()),
+    rand:seed(os:timestamp()),
 
     BaseConfig = proplists:delete(small_keys, Config0),
     KeyOpts =
