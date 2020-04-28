@@ -62,6 +62,7 @@
          stop/1,
          get/3,
          put/5,
+         put/6,
          delete/4,
          drop/1,
          fold_buckets/4,
@@ -90,7 +91,7 @@
 
 -define(API_VERSION, 1).
 -define(CAPABILITIES, [async_fold, index_reformat]).
--define(ANY_CAPABILITIES, [indexes, iterator_refresh]).
+-define(ANY_CAPABILITIES, [indexes, iterator_refresh, backend_reap]).
 
 -record (state, {backends :: [{atom(), atom(), term()}], % [{BackendName, BackendModule, SubState}]
                  default_backend :: atom()}).
@@ -256,6 +257,19 @@ head(Bucket, Key, State) ->
 %% @doc Insert an object with secondary index
 %% information into the kv backend
 -type index_spec() :: {add, Index, SecondaryKey} | {remove, Index, SecondaryKey}.
+-spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
+    {ok, state()} |
+    {error, term(), state()}.
+put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, State) ->
+    {Name, Module, SubState} = get_backend(Bucket, State),
+    case Module:put(Bucket, PrimaryKey, IndexSpecs, Value, TimeStampExpire, SubState) of
+        {ok, NewSubState} ->
+            NewState = update_backend_state(Name, Module, NewSubState, State),
+            {ok, NewState};
+        {error, Reason, NewSubState} ->
+            NewState = update_backend_state(Name, Module, NewSubState, State),
+            {error, Reason, NewState}
+    end.
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.

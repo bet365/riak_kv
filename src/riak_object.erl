@@ -107,6 +107,7 @@
 -export([strict_descendant/2, new_actor_epoch/2]).
 -export([find_bestobject/1]).
 -export([spoof_getdeletedobject/1]).
+-export([set_expire_time/2, has_expire_time/1]).
 
 -ifdef(TEST).
 -export([convert_object_to_headonly/3]). % Used in unit testing of get_core
@@ -1512,6 +1513,36 @@ decode_vclock(Method, VClock) ->
         encode_zlib -> binary_to_term(zlib:unzip(VClock));
         _           -> lager:error("Bad vclock encoding method ~p", [Method]),
                        throw(bad_vclock_encoding_method)
+    end.
+
+-spec set_expire_time(riak_object(), integer()) -> riak_object().
+set_expire_time(#r_object{} = RObj0, TstampExpire) ->
+    MD0 = riak_object:get_update_metadata(RObj0),
+    MD1 = dict:store(?MD_EXPIRE, TstampExpire, MD0),
+    RObj1 = riak_object:update_metadata(RObj0, MD1),
+    RObj1.
+
+%% Check all contents of the object and validate that all values are set to be 
+%% expired. If so, take the max expire tstamp.
+-spec has_expire_time(riak_object() | undefined) -> false | integer().
+has_expire_time(undefined) -> false;
+has_expire_time(#r_object{} = RObj) ->
+    case riak_object:get_contents(RObj) of
+        [] ->
+            false;
+        Contents ->
+            case [O || O = {MD, _} <- Contents, dict:is_key(?MD_EXPIRE, MD) =:= false] of
+                [] ->
+                    lists:max([expire_time(MD) || {MD, _} <- Contents]);
+                _ -> false
+            end
+    end.
+
+-spec expire_time(riak_object_dict()) -> false | integer().
+expire_time(MD) ->
+    case dict:find(?MD_EXPIRE, MD) of
+        error -> false;
+        {ok, TstampExpire} -> TstampExpire
     end.
 
 -ifdef(TEST).

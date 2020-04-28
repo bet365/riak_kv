@@ -152,10 +152,10 @@ start_exchange_remote(FsmPid, Version, From, IndexN, Tree) ->
 %% @doc Update all hashtrees managed by the provided index_hashtree pid.
 -spec update(index_n(), pid()) -> ok | not_responsible.
 update(Id, Tree) ->
-    update(Id, Tree, undefined).
+  gen_server:call(Tree, {update_tree, Id}, infinity).
 
 %% @doc Update all hashtrees managed by the provided index_hashtree pid.
--spec update(index_n(), pid(), undefined | update_callback()) -> ok | not_responsible.
+-spec update(index_n(), pid(),  undefined | update_callback()) -> ok | not_responsible.
 update(Id, Tree, undefined) ->
     gen_server:call(Tree, {update_tree, Id, undefined}, infinity);
 update(Id, Tree, Callback) when is_function(Callback) ->
@@ -341,15 +341,10 @@ handle_call({delete, Items}, _From, State) ->
 handle_call(get_trees, _From, #state{trees=Trees}=State) ->
     {reply, Trees, State};
 
+handle_call({update_tree, Id}, From, State) ->
+  do_update_tree(Id, undefined, From, State);
 handle_call({update_tree, Id, Callback}, From, State) ->
-    lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
-    apply_tree(Id,
-        fun(Tree) ->
-            NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),
-            {noreply, NewTree}
-            end,
-        State
-    );
+    do_update_tree(Id, Callback, From, State);
 
 handle_call({exchange_bucket, Id, Level, Bucket}, _From, State) ->
     apply_tree(Id,
@@ -619,9 +614,9 @@ fold_keys(Partition, HashtreePid, Index, HasIndexTree) ->
     Opts = 
         case Version of 
             legacy ->
-                [aae_reconstruction, {iterator_refresh, true}];
+                [aae_reconstruction, {iterator_refresh, true}, ignore_deletes_with_expiry];
             _ ->
-                [aae_reconstruction, {iterator_refresh, true}, fold_heads]
+                [aae_reconstruction, {iterator_refresh, true}, ignore_deletes_with_expiry, fold_heads]
         end,
     Req =
         riak_core_util:make_fold_req(FoldFun, {0, {Limit, Wait}}, false, Opts),
@@ -649,6 +644,7 @@ get_build_throttle() ->
     app_helper:get_env(riak_kv,
                        anti_entropy_build_throttle,
                        ?DEFAULT_BUILD_THROTTLE).
+
 
 maybe_throttle_build(RObjBin, Limit, Wait, Acc) ->
     ObjSize = byte_size(RObjBin),
@@ -1039,7 +1035,7 @@ clear_tree(State=#state{index=Index}) ->
     State3#state{built=false, expired=false}.
 
 destroy_trees(State) ->
-    State2 = close_trees(State, true),
+    State2 = close_trees(State),
     {_,Tree0} = hd(State#state.trees), % deliberately using state with live db ref
     _ = hashtree:destroy(Tree0),
     State2.
@@ -1111,43 +1107,17 @@ maybe_rebuild(State) ->
 has_index_tree(Trees) ->
     orddict:is_key(?INDEX_2I_N, Trees).
 
-close_trees(State) ->
-    close_trees(State, false).
-
-close_trees(State=#state{trees=undefined}, _WillDestroy) ->
-    State;
-close_trees(State=#state{trees=Trees}, false) ->
+close_trees(State=#state{trees=Trees}) ->
     Trees2 = [begin
                   NewTree = try
-                                case hashtree:next_rebuild(Tree) of
-                                    %% Not marking close cleanly to avoid the
-                                    %% cost of a full rebuild on shutdown.
-                                    full ->
-                                        lager:info("Deliberately marking KV hashtree ~p"
-                                                   ++ " for full rebuild on next restart",
-                                                   [IdxN]),
-                                        hashtree:flush_buffer(Tree);
-                                    incremental ->
-                                        HT = hashtree:update_tree(Tree),
-                                        hashtree:mark_clean_close(IdxN, HT)
-                                end
-                            catch _:Err ->
-                                    lager:warning("Failed to flush/update trees"
-                                                  ++ " during close | Error: ~p", [Err]),
-                                    Tree
+                                hashtree:flush_buffer(Tree)
+                            catch _:_ ->
+                      Tree
                             end,
                   {IdxN, NewTree}
               end || {IdxN, Tree} <- Trees],
-    really_close_trees(Trees2, State);
-
-close_trees(#state{trees=Trees} = State, true) ->
-    really_close_trees(Trees, State).
-
-really_close_trees(Trees, State) ->
-    lists:foreach(fun really_close_tree/1, Trees),
-    State#state{trees = undefined}.
-
-really_close_tree({_IdxN, Tree}) -> hashtree:close(Tree).
+    Trees3 = [{IdxN, hashtree:close(Tree)} || {IdxN, Tree} <- Trees2],
+    State#state{trees=Trees3}.
 
 -spec get_all_locks(build | rehash | upgrade, index(), pid()) -> boolean().
 get_all_locks(Type, Index, Pid) ->
@@ -1219,3 +1189,13 @@ maybe_callback(undefined) ->
     ok;
 maybe_callback(Callback) ->
     Callback().
+
+do_update_tree(Id, Callback, From, State) ->
+  lager:debug("Updating tree: (vnode)=~p (preflist)=~p", [State#state.index, Id]),
+  apply_tree(Id,
+    fun(Tree) ->
+      NewTree = snapshot_and_async_update_tree(Tree, Id, From, Callback),
+      {noreply, NewTree}
+    end,
+    State
+  ).

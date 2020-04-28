@@ -295,45 +295,51 @@ final_action(GetCore = #getcore{n = N, merged = Merged0, results = Results,
                 Merged0
             end,
     {ObjState, MObj} = Merged,
+    ReadRepairs = case ObjState of
+                      notfound ->
+                          [];
+                      _ -> % ok or tombstone
+                          %% Any object that is strictly descended by
+                          %% the merge result must be read-repaired,
+                          %% this ensures even tombstones get repaired
+                          %% so reap will work. We join the list of
+                          %% dominated (in need of repair) indexes and
+                          %% the list of not_found (in need of repair)
+                          %% indexes.
+                          [{Idx, outofdate} || {Idx, {ok, RObj}} <- Results,
+                                  riak_object:strict_descendant(MObj, RObj)] ++
+                              [{Idx, notfound} || {Idx, {error, notfound}} <- Results]
+                  end,
 
-    ReadRepairs =
-        case ObjState of
-            notfound ->
-                [];
-            _ -> % ok or tombstone
-                %% Any object that is strictly descended by
-                %% the merge result must be read-repaired,
-                %% this ensures even tombstones get repaired
-                %% so reap will work. We join the list of
-                %% dominated (in need of repair) indexes and
-                %% the list of not_found (in need of repair)
-                %% indexes.
-                [{Idx, outofdate} || {Idx, {ok, RObj}} <- Results,
-                        riak_object:strict_descendant(MObj, RObj)] ++
-                    [{Idx, notfound} || {Idx, {error, notfound}} <- Results]
-        end,
+    HasExpire = case riak_object:has_expire_time(MObj) of
+                    false ->
+                        false;
+                    _ ->
+                        true
+                end,
     Action =
         case ReadRepairs of
-           [] when ObjState == tombstone ->
-               %% Allow delete if merge object is deleted,
-               %% there are no read repairs pending and
-               %% a value was received from all vnodes
-               case riak_kv_util:is_x_deleted(MObj) andalso
-                   length([xx || {_Idx, {ok, _RObj}} <- Results]) == N of
-                   true ->
-                       delete;
-                   _ ->
-                       % maybe_log_old_vclock(Results),
-                       nop
-               end;
-           [] when ObjState == notfound ->
-               nop;
-           [] ->
-               % maybe_log_old_vclock(Results),
-               nop;
-           _ ->
-               {read_repair, ReadRepairs, MObj}
-       end,
+            [] when ObjState == tombstone ->
+                %% Allow delete if merge object is deleted,
+                %% there are no read repairs pending and
+                %% a value was received from all vnodes
+                case riak_kv_util:is_x_deleted(MObj) andalso
+                    length([xx || {_Idx, {ok, _RObj}} <- Results]) == N andalso
+                    not HasExpire of
+                    true ->
+                        delete;
+                    _ ->
+                        %%maybe_log_old_vclock(Results),
+                        nop
+                end;
+            [] when ObjState == notfound ->
+                nop;
+            [] ->
+                %%maybe_log_old_vclock(Results),
+                nop;
+            _ ->
+                {read_repair, ReadRepairs, MObj}
+        end,
     {Action, GetCore#getcore{merged = Merged}}.
 
 

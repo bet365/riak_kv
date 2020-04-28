@@ -27,6 +27,7 @@
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.
+-include_lib("riak_kv_vnode.hrl").
 -include("riak_kv_wm_raw.hrl").
 
 -export([start_link/6, start_link/7, start_link/8, delete/8]).
@@ -74,6 +75,7 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,undefined) ->
             end
     end;
 delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
+    BackendReapMode = riak_kv_util:backend_reap_mode(Bucket),
     riak_core_dtrace:put_tag(io_lib:format("~p,~p", [Bucket, Key])),
     ?DTRACE(?C_DELETE_INIT2, [0], []),
     case get_w_options(Bucket, Options) of
@@ -81,26 +83,29 @@ delete(ReqId,Bucket,Key,Options,Timeout,Client,ClientId,VClock) ->
             ?DTRACE(?C_DELETE_INIT2, [-1], []),
             Client ! {ReqId, {error, Reason}};
         {W, PW, DW, PassThruOptions} ->
-            Obj0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED,
-                                                                 "true", dict:new())),
-            Tombstone = riak_object:set_vclock(Obj0, VClock),
-            {ok, C} = riak:local_client(ClientId),
+            Tombstone = create_tombstone(VClock, Bucket, Key, BackendReapMode),
+            {ok,C} = riak:local_client(ClientId),
             PutOpts = [{w,W}, {pw,PW}, {dw, DW}, {timeout,Timeout}] ++ PassThruOptions,
             Reply = riak_client:put(Tombstone, PutOpts, C),
             Client ! {ReqId, Reply},
-            HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
-            case Reply of
-                ok when HasCustomN_val == false ->
-                    ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
-                    {ok, C2} = riak:local_client(),
-                    AsyncTimeout = 60*1000,     % Avoid client-specified value
-                    Res = riak_client:get(Bucket, Key, all, AsyncTimeout, C2),
-                    ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
-                    Res;
-                _ ->
-                    ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
-                    nop
-            end
+            maybe_reap(Bucket, Key, Reply, Options, BackendReapMode)
+    end.
+
+maybe_reap(_Bucket, _Key, _Reply, _Options, {backend_reap, _BackendreapThreshold}) ->
+    nop;
+maybe_reap(Bucket, Key, Reply, Options, normal) ->
+    HasCustomN_val = proplists:get_value(n_val, Options) /= undefined,
+    case Reply of
+        ok when HasCustomN_val == false ->
+            ?DTRACE(?C_DELETE_INIT2, [1], [<<"reap">>]),
+            {ok, C2} = riak:local_client(),
+            AsyncTimeout = 60*1000,     % Avoid client-specified value
+            Res = C2:get(Bucket, Key, all, AsyncTimeout),
+            ?DTRACE(?C_DELETE_REAPER_GET_DONE, [1], [<<"reap">>]),
+            Res;
+        _ ->
+            ?DTRACE(?C_DELETE_INIT2, [2], [<<"nop">>]),
+            nop
     end.
 
 get_r_options(Bucket, Options) ->
@@ -196,6 +201,24 @@ extract_passthru_options(Options) ->
     [Opt || {K, _} = Opt <- Options,
             K == sloppy_quorum orelse K == n_val].
 
+create_tombstone(VClock, Bucket, Key, DeleteMode) ->
+    Tombstone0 = riak_object:new(Bucket, Key, <<>>, dict:store(?MD_DELETED, "true", dict:new())),
+    Tombstone1 = riak_object:set_vclock(Tombstone0, VClock),
+    maybe_backend_reap(Tombstone1, DeleteMode).
+
+%% Get backend_reap_threshold and if it is non-zero tag the object with an expiry
+%% metadata containing an absolute expiry epoch.
+maybe_backend_reap(Tombstone0, {backend_reap, BackendReapThreshold}) ->
+    TstampExpire = create_expiry_time(BackendReapThreshold),
+    Tombstone1 = riak_object:set_expire_time(Tombstone0, TstampExpire),
+    Tombstone1;
+maybe_backend_reap(Tombstone, _) ->
+    Tombstone.
+
+create_expiry_time(BackendReapThreshold) ->
+    {M, S, _} = os:timestamp(),
+    Now = M * 1000000 + S,
+    Now + BackendReapThreshold.
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================

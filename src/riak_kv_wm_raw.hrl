@@ -24,6 +24,7 @@
 -define(MD_USERMETA, <<"X-Riak-Meta">>).
 -define(MD_INDEX,    <<"index">>).
 -define(MD_DELETED,  <<"X-Riak-Deleted">>).
+-define(MD_EXPIRE,  <<"X-Riak-Expire">>).
 -define(MD_VAL_ENCODING, <<"X-Riak-Val-Encoding">>).
 
 %% Names of HTTP header fields

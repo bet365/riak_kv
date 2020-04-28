@@ -31,6 +31,7 @@
          stop/1,
          get/3,
          put/5,
+         put/6,
          async_put/5,
          delete/4,
          drop/1,
@@ -175,6 +176,11 @@ get(Bucket, Key, #state{read_opts=ReadOpts,
 
 %% @doc Insert an object into the eleveldb backend.
 -type index_spec() :: {add, Index, SecondaryKey} | {remove, Index, SecondaryKey}.
+-spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
+    {ok, state()} |
+    {error, term(), state()}.
+put(_Bucket, _PrimaryKey, _IndexSpecs, _Val, _TimeStampExpire, State) ->
+    {error, eleveldb_does_not_support_object_expiration, State}.
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.

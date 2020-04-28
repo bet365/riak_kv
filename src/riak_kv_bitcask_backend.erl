@@ -31,6 +31,7 @@
          stop/1,
          get/3,
          put/5,
+         put/6,
          delete/4,
          drop/1,
          fold_buckets/4,
@@ -40,7 +41,9 @@
          status/1,
          callback/3]).
 
--export([data_size/1]).
+-export([data_size/1,
+         encode_disk_key/2,
+         decode_disk_key/1]).
 
 -ifdef(EQC).
 -include_lib("eqc/include/eqc.hrl").
@@ -61,14 +64,20 @@
 -define(MERGE_FILE, "merge.txt").
 -define(VERSION_FILE, "version.txt").
 -define(API_VERSION, 1).
--define(CAPABILITIES, [async_fold,size]).
+-define(CAPABILITIES, [async_fold,size,backend_reap]).
 -define(TERMINAL_POSIX_ERRORS, [eacces, erofs, enodev, enospc]).
 
 %% must not be 131, otherwise will match t2b in error
 %% yes, I know that this is horrible.
+-define(VERSION_0, 131).
 -define(VERSION_1, 1).
--define(VERSION_BYTE, ?VERSION_1).
--define(CURRENT_KEY_TRANS, fun key_transform_to_1/1).
+-define(VERSION_2, 2).
+
+-define(CURRENT_VERSION, ?VERSION_2).
+-define(ENCODE_DISK_KEY_FUN, fun encode_disk_key/2).
+-define(DECODE_DISK_KEY_FUN, fun decode_disk_key/1).
+
+
 
 -record(state, {ref :: reference() | undefined,
                 data_dir :: string(),
@@ -81,6 +90,7 @@
 -type config() :: [{atom(), term()}].
 -type version() :: {non_neg_integer(), non_neg_integer(), non_neg_integer()}.
 
+%%
 %% ===================================================================
 %% Public API
 %% ===================================================================
@@ -101,58 +111,19 @@ capabilities(_) ->
 capabilities(_, _) ->
     {ok, ?CAPABILITIES}.
 
-%% @doc Transformation functions for the keys coming off the disk.
-key_transform_to_1(<<?VERSION_1:7, _:1, _Rest/binary>> = Key) ->
-    Key;
-key_transform_to_1(<<131:8,_Rest/bits>> = Key0) ->
-    {Bucket, Key} = binary_to_term(Key0),
-    make_bk(?VERSION_BYTE, Bucket, Key).
-
-key_transform_to_0(<<?VERSION_1:7,_Rest/bits>> = Key0) ->
-    term_to_binary(bk_to_tuple(Key0));
-key_transform_to_0(<<131:8,_Rest/binary>> = Key) ->
-    Key.
-
-bk_to_tuple(<<?VERSION_1:7, HasType:1, Sz:16/integer,
-             TypeOrBucket:Sz/bytes, Rest/binary>>) ->
-    case HasType of
-        0 ->
-            %% no type, first field is bucket
-            {TypeOrBucket, Rest};
-        1 ->
-            %% has a tyoe, extract bucket as well
-            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
-            {{TypeOrBucket, Bucket}, Key}
-    end;
-bk_to_tuple(<<131:8,_Rest/binary>> = BK) ->
-    binary_to_term(BK).
-
-make_bk(0, Bucket, Key) ->
-    term_to_binary({Bucket, Key});
-make_bk(1, {Type, Bucket}, Key) ->
-    TypeSz = size(Type),
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 1:1, TypeSz:16/integer, Type/binary,
-      BucketSz:16/integer, Bucket/binary, Key/binary>>;
-make_bk(1, Bucket, Key) ->
-    BucketSz = size(Bucket),
-    <<?VERSION_BYTE:7, 0:1, BucketSz:16/integer,
-     Bucket/binary, Key/binary>>.
-
 %% @doc Start the bitcask backend
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config0) ->
-    {Config, KeyVsn} =
-        case app_helper:get_prop_or_env(small_keys, Config0, bitcask) of
-            false ->
-                C0 = proplists:delete(small_keys, Config0),
-                C1 = C0 ++ [{key_transform, fun key_transform_to_0/1}],
-                {C1, 0};
-            _ ->
-                C0 = proplists:delete(small_keys, Config0),
-                C1 = C0 ++ [{key_transform, ?CURRENT_KEY_TRANS}],
-                {C1, ?VERSION_BYTE}
-        end,
+    random:seed(os:timestamp()),
+
+    BaseConfig = proplists:delete(small_keys, Config0),
+    KeyOpts =
+        [
+            {encode_disk_key_fun, ?ENCODE_DISK_KEY_FUN},
+            {decode_disk_key_fun, ?DECODE_DISK_KEY_FUN}
+        ],
+    Config = BaseConfig ++ KeyOpts,
+    KeyVsn = ?CURRENT_VERSION,
 
     %% Get the data root directory
     case app_helper:get_prop_or_env(data_root, Config, bitcask) of
@@ -207,7 +178,7 @@ stop(#state{ref=Ref}) ->
                  {error, not_found, state()} |
                  {error, term(), state()}.
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
-    BitcaskKey = make_bk(KVers, Bucket, Key),
+    BitcaskKey = make_bitcask_key(KVers, Bucket, Key),
     case bitcask:get(Ref, BitcaskKey) of
         {ok, Value} ->
             {ok, Value, State};
@@ -228,12 +199,24 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers}=State) ->
 %% secondary indexing and the_IndexSpecs parameter
 %% is ignored.
 -type index_spec() :: {add, Index, SecondaryKey} | {remove, Index, SecondaryKey}.
+-spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
+                 {ok, state()} |
+                 {error, term(), state()}.
+put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
+    Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}],
+    case bitcask:put(Ref, BitcaskKey, Val, Opts) of
+        ok ->
+            {ok, State};
+        {error, Reason} ->
+            {error, Reason, State}
+    end.
+
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val,
-    #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, PrimaryKey),
+put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
     case bitcask:put(Ref, BitcaskKey, Val) of
         ok ->
             {ok, State};
@@ -252,9 +235,8 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val,
 %% is ignored.
 -spec delete(riak_object:bucket(), riak_object:key(), [index_spec()], state()) ->
                     {ok, state()}.
-delete(Bucket, Key, _IndexSpecs,
-       #state{ref=Ref, key_vsn=KeyVsn}=State) ->
-    BitcaskKey = make_bk(KeyVsn, Bucket, Key),
+delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn}=State) ->
+    BitcaskKey = make_bitcask_key(KeyVsn, Bucket, Key),
     ok = bitcask:delete(Ref, BitcaskKey),
     {ok, State}.
 
@@ -268,6 +250,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                ref=Ref,
                                                root=DataRoot}) ->
     FoldFun = fold_buckets_fun(FoldBucketsFun),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -280,7 +263,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                     {Acc1, _} =
                                         bitcask:fold_keys(Ref1,
                                                           FoldFun,
-                                                          {Acc, sets:new()}),
+                                                          {Acc, sets:new()}, FoldOpts),
                                         Acc1
                                 after
                                     bitcask:close(Ref1)
@@ -292,7 +275,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
             {async, BucketFolder};
         false ->
             {FoldResult, _Bucketset} =
-                bitcask:fold_keys(Ref, FoldFun, {Acc, sets:new()}),
+                bitcask:fold_keys(Ref, FoldFun, {Acc, sets:new()}, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -312,6 +295,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -320,7 +304,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask:fold_keys(Ref1, FoldFun, Acc)
+                                    bitcask:fold_keys(Ref1, FoldFun, Acc, FoldOpts)
                                 after
                                     bitcask:close(Ref1)
                                 end;
@@ -330,7 +314,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, KeyFolder};
         false ->
-            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc),
+            FoldResult = bitcask:fold_keys(Ref, FoldFun, Acc, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -338,6 +322,15 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                     {ok, FoldResult}
             end
     end.
+
+build_bitcask_fold_opts(Opts) ->
+    case lists:member(ignore_deletes_with_expiry, Opts) of
+        true ->
+            [{ignore_tstamp_expire_keys, true}];
+        false ->
+            []
+    end.
+
 
 %% @doc Fold over all the objects for one or all buckets.
 -spec fold_objects(riak_kv_backend:fold_objects_fun(),
@@ -350,6 +343,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                root=DataRoot}) ->
     Bucket =  proplists:get_value(bucket, Opts),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -358,7 +352,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case bitcask:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask:fold(Ref1, FoldFun, Acc)
+                                    bitcask:fold(Ref1, FoldFun, Acc, FoldOpts)
                                 after
                                     bitcask:close(Ref1)
                                 end;
@@ -368,7 +362,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, ObjectFolder};
         false ->
-            FoldResult = bitcask:fold(Ref, FoldFun, Acc),
+            FoldResult = bitcask:fold(Ref, FoldFun, Acc, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -472,6 +466,107 @@ callback(_Ref, _Msg, State) ->
     {ok, State}.
 
 %% ===================================================================
+%% Key Encode and Decode Functions
+%% ===================================================================
+
+%% Make the bitcask keydir key, based on the version number we are using and the bucket, key from riak
+make_bitcask_key(0, Bucket, Key) ->
+    term_to_binary({Bucket, Key});
+
+make_bitcask_key(1, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_bitcask_key(1, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_bitcask_key(2, {Type, Bucket}, Key) ->
+    TypeSz = size(Type),
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 1:1, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
+
+make_bitcask_key(2, Bucket, Key) ->
+    BucketSz = size(Bucket),
+    <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
+
+
+
+
+%% Make the riak key from the bitcask key, based on the version number
+make_riak_key(<<?VERSION_2:7, HasType:1, Sz:16/integer,
+    TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end;
+make_riak_key(<<?VERSION_1:7, HasType:1, Sz:16/integer,
+    TypeOrBucket:Sz/bytes, Rest/binary>>) ->
+    case HasType of
+        0 ->
+            %% no type, first field is bucket
+            {TypeOrBucket, Rest};
+        1 ->
+            %% has a tyoe, extract bucket as well
+            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
+            {{TypeOrBucket, Bucket}, Key}
+    end;
+make_riak_key(<<?VERSION_0:8,_Rest/binary>> = BK) ->
+    binary_to_term(BK).
+
+
+
+
+%% Take the bitcask key stored down to disk, and decode it to match the keydir stored in memory
+%% return the keyinfo record, to find additional information that was stored down in the encoding
+decode_disk_key(<<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/binary>>) ->
+    #keyinfo{
+        key = <<?CURRENT_VERSION:7, Type:1, Rest/binary>>,
+        tstamp_expire = TstampExpire
+    };
+
+decode_disk_key(<<?VERSION_1:7, 0:1, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+    #keyinfo{
+        key = make_bitcask_key(?CURRENT_VERSION, Bucket, Key)
+    };
+
+decode_disk_key(<<?VERSION_1:7, 1:1, TypeSz:16/integer, Type:TypeSz/binary, BucketSz:16/integer, Bucket:BucketSz/binary, Key/binary>>) ->
+    #keyinfo{
+        key = make_bitcask_key(?CURRENT_VERSION, {Type, Bucket}, Key)
+    };
+
+decode_disk_key(<<?VERSION_0:8,_Rest/bits>> = Key0) ->
+    {Bucket, Key} = binary_to_term(Key0),
+    #keyinfo{
+        key = make_bitcask_key(?CURRENT_VERSION, Bucket, Key)
+    }.
+
+
+
+
+%% Take the bitcask key generated by make_bitask_key, and encode it with additional information to be stored down to
+%% disk, but not stored in the keydir.
+encode_disk_key(<<?VERSION_2:7, Type:1, Rest/bits>>, Opts) ->
+    TstampExpire = proplists:get_value(?TSTAMP_EXPIRE_KEY, Opts, ?DEFAULT_TSTAMP_EXPIRE),
+    <<?VERSION_2:7, Type:1, TstampExpire:32/integer, Rest/bits>>;
+
+encode_disk_key(<<?VERSION_1:7, _Rest/bits>> = BitcaskKey, _Opts) ->
+    BitcaskKey;
+
+encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
+    BitcaskKey.
+
+
+
+
+
+%% ===================================================================
 %% Internal functions
 %% ===================================================================
 
@@ -515,7 +610,7 @@ check_fcntl() ->
 %% Return a function to fold over the buckets on this backend
 fold_buckets_fun(FoldBucketsFun) ->
     fun(#bitcask_entry{key=BK}, {Acc, BucketSet}) ->
-            {Bucket, _} = bk_to_tuple(BK),
+            {Bucket, _} = make_riak_key(BK),
             case sets:is_element(Bucket, BucketSet) of
                 true ->
                     {Acc, BucketSet};
@@ -529,12 +624,12 @@ fold_buckets_fun(FoldBucketsFun) ->
 %% Return a function to fold over keys on this backend
 fold_keys_fun(FoldKeysFun, undefined) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-            {Bucket, Key} = bk_to_tuple(BK),
+            {Bucket, Key} = make_riak_key(BK),
             FoldKeysFun(Bucket, Key, Acc)
     end;
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-            {B, Key} = bk_to_tuple(BK),
+            {B, Key} = make_riak_key(BK),
             case B =:= Bucket of
                 true ->
                     FoldKeysFun(B, Key, Acc);
@@ -547,12 +642,12 @@ fold_keys_fun(FoldKeysFun, Bucket) ->
 %% Return a function to fold over keys on this backend
 fold_objects_fun(FoldObjectsFun, undefined) ->
     fun(BK, Value, Acc) ->
-            {Bucket, Key} = bk_to_tuple(BK),
+            {Bucket, Key} = make_riak_key(BK),
             FoldObjectsFun(Bucket, Key, Value, Acc)
     end;
 fold_objects_fun(FoldObjectsFun, Bucket) ->
     fun(BK, Value, Acc) ->
-            {B, Key} = bk_to_tuple(BK),
+            {B, Key} = make_riak_key(BK),
             case B =:= Bucket of
                 true ->
                     FoldObjectsFun(B, Key, Value, Acc);

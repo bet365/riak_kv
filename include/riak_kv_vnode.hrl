@@ -24,3 +24,5 @@
 -define(ENABLE_TICTACAAE, true).
 -define(PARALLEL_AAEORDER, leveled_ko).
 -define(REBUILD_SCHEDULE, {120, 14400}).
+
+-define(DEFAULT_DELETE_MODE, 3000).

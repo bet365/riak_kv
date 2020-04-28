@@ -3200,7 +3200,6 @@ do_diffobj_put({Bucket, Key}=BKey, DiffObj,
             end
     end.
 
-
 -spec aae_update(binary(), binary(),
                     riak_object:riak_object()|none|undefined|use_binary,
                     old_object(),
@@ -3308,7 +3307,6 @@ maybe_old_object(OldObject) ->
 
 
 -spec update_hashtree(binary(), binary(), riak_object:riak_object(), pid()) 
-                                                                        -> ok.
 %% @doc
 %% Update hashtree based AAE when enabled.
 %% Note that this requires an object copy - the object has been converted from
@@ -3317,14 +3315,19 @@ maybe_old_object(OldObject) ->
 %% scope for greater efficiency here, even without moving to Tictac AAE
 update_hashtree(Bucket, Key, RObj, Trees) ->
     Items = [{object, {Bucket, Key}, RObj}],
-    case get_hashtree_token() of
-        true ->
-            riak_kv_index_hashtree:async_insert(Items, [], Trees),
-            ok;
+    case riak_object:has_expire_time(RObj) of
         false ->
-            riak_kv_index_hashtree:insert(Items, [], Trees),
-            put(hashtree_tokens, max_hashtree_tokens()),
-            ok
+            case get_hashtree_token() of
+                true ->
+                    riak_kv_index_hashtree:async_insert(Items, [], Trees),
+                    ok;
+                false ->
+                    riak_kv_index_hashtree:insert(Items, [], Trees),
+                    put(hashtree_tokens, max_hashtree_tokens()),
+                    ok
+            end;
+        _->
+            delete_from_hashtree(Bucket, Key, Trees)
     end.
 
 
@@ -3516,11 +3519,17 @@ encode_and_put_no_sib_check(Obj, Mod, Bucket, Key, IndexSpecs, ModState,
                         false ->
                             ok
                     end,
-                    PutRet = Mod:put(Bucket, Key, IndexSpecs, EncodedVal,
-                                     ModState),
+                    TstampExpire = riak_object:has_expire_time(Obj),
+                    PutRet = maybe_put_with_expire_time(Bucket, Key, IndexSpecs, 
+                                EncodedVal, Mod, ModState, TstampExpire),
                     {PutRet, EncodedVal}
             end
     end.
+
+maybe_put_with_expire_time(Bucket, Key, IndexSpecs, EncodedVal, Mod, ModState, false) ->
+    Mod:put(Bucket, Key, IndexSpecs, EncodedVal, ModState);
+maybe_put_with_expire_time(Bucket, Key, IndexSpecs, EncodedVal, Mod, ModState, TstampExpire) ->
+    Mod:put(Bucket, Key, IndexSpecs, EncodedVal, TstampExpire, ModState).
 
 uses_r_object(Mod, ModState, Bucket) ->
     {ok, Capabilities} = Mod:capabilities(Bucket, ModState),

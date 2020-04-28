@@ -48,8 +48,13 @@
          get_write_once/1,
          overload_reply/1,
          get_backend_config/3,
+<<<<<<< HEAD
          is_modfun_allowed/2]).
 -export([report_hashtree_tokens/0, reset_hashtree_tokens/2]).
+=======
+         is_modfun_allowed/2,
+         backend_reap_mode/1]).
+>>>>>>> develop-2.2.8
 
 -include_lib("riak_kv_vnode.hrl").
 
@@ -196,6 +201,7 @@ get_write_once(Bucket) ->
             Err
     end.
 
+<<<<<<< HEAD
 
 
 %% ===================================================================
@@ -235,6 +241,156 @@ reset_hashtree_tokens(MinToken, MaxToken) when MaxToken >= MinToken ->
     lists:foreach(ResetTokenFun, OnlinePrimaries),
     ok.
 
+=======
+backend_reap_mode(Bucket) ->
+    case maybe_get_backend_reap_threshold() of
+        normal ->
+            normal;
+        BackendReap ->
+            case check_backend_reap_module_capability() of
+                false ->
+                    normal;
+                true ->
+                    case check_backend_reap_core_capability() of
+                        false ->
+                            normal;
+                        true ->
+                            case check_bucket(Bucket) of
+                                false ->
+                                    normal;
+                                true ->
+                                    BackendReap
+                            end
+                    end
+            end
+    end.
+
+%% ===================================================================
+%% Helper functions for delete mode
+%% ===================================================================
+maybe_get_backend_reap_threshold() ->
+    case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
+        undefined ->
+            normal;
+        BackendreapThreshold ->
+            {backend_reap, BackendreapThreshold}
+    end.
+
+%% ================================================================================================= %%
+check_backend_reap_module_capability() ->
+    case app_helper:get_env(riak_kv, backend_reap_module_capability, undefined) of
+        undefined ->
+            set_backend_reap_module_capability();
+        BackendReapCap ->
+            BackendReapCap
+    end.
+set_backend_reap_module_capability() ->
+    BackendCaps = case app_helper:get_env(riak_kv, storage_backend, undefined) of
+                      undefined ->
+                          lager:error("undefined riak_kv storage_backend environment variable"),
+                          [];
+                      riak_kv_multi_backend ->
+                          MultiBackendConfig = app_helper:get_env(riak_kv, multi_backend, []),
+                          find_all_backends_capabilities(MultiBackendConfig, []);
+                      Mod ->
+                          case Mod:capabilities(state) of
+                              {ok, Caps} ->
+                                  Caps;
+                              _ ->
+                                  []
+                          end
+                  end,
+    BackendReapCap =  lists:member(backend_reap, BackendCaps),
+    application:set_env(riak_kv, backend_reap_module_capability, BackendReapCap),
+    BackendReapCap.
+find_all_backends_capabilities([], Caps) ->
+    Caps;
+find_all_backends_capabilities([{_,Backend,_}| Rest], Caps) ->
+    {ok, BackendCaps} = Backend:capabilities(state),
+    find_all_backends_capabilities(Rest, Caps++BackendCaps).
+
+%% ================================================================================================= %%
+check_backend_reap_core_capability() ->
+    case app_helper:get_env(riak_kv, backend_reap_core_capability, false) of
+        false ->
+            BackendreapCoreCap = riak_core_capability:get({riak_kv, backend_reap}, false),
+            application:set_env(riak_kv, backend_reap_core_capability, BackendreapCoreCap),
+            BackendreapCoreCap;
+        true ->
+            true
+    end.
+
+%% ================================================================================================= %%
+check_bucket(Bucket) ->
+    case app_helper:get_env(riak_kv, storage_backend, undefined) of
+        undefined ->
+            lager:error("undefined riak_kv storage_backend environment variable"),
+            false;
+        riak_kv_multi_backend ->
+            check_backend_reap_module_capability(Bucket);
+        _ ->
+            true
+    end.
+
+check_backend_reap_module_capability(Bucket) ->
+    case app_helper:get_env(riak_kv, bucket_to_backend_reap_capability_dict, undefined) of
+        undefined ->
+            Dict = build_bucket_to_backend_reap_capability_dict(),
+            application:set_env(riak_kv, bucket_to_backend_reap_capability_dict, Dict),
+            check_bucket(Bucket, Dict);
+        Dict ->
+            check_bucket(Bucket, Dict)
+    end.
+
+check_bucket(Bucket, Dict) ->
+    case dict:find(Bucket, Dict) of
+        {ok, Boolean} ->
+            Boolean;
+        error ->
+            return_default_bucket_backend_capability(Dict)
+    end.
+return_default_bucket_backend_capability(Dict) ->
+    case dict:find(default, Dict) of
+        {ok, true} ->
+            true;
+        _ ->
+            false
+    end.
+
+%% ================================================================================================= %%
+build_bucket_to_backend_reap_capability_dict() ->
+    case app_helper:get_env(riak_kv, multi_backend_default, undefined) of
+        undefined ->
+            dict:new();
+        DefaultBucket ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket)
+    end.
+build_bucket_to_backend_reap_capability_dict(DefaultBucket) ->
+    case app_helper:get_env(riak_kv, multi_backend, undefined) of
+        undefined ->
+            dict:new();
+        MultiBackendConfig ->
+            build_bucket_to_backend_reap_capability_dict(DefaultBucket, MultiBackendConfig, dict:new())
+    end.
+build_bucket_to_backend_reap_capability_dict(_, [], Dict) ->
+    Dict;
+build_bucket_to_backend_reap_capability_dict(DefaultBucket, [{Bucket, BackendMod, _} | Rest], Dict) ->
+    BackendCaps = case BackendMod:capabilities(state) of
+                      {ok, Caps} ->
+                          Caps;
+                      _ ->
+                          []
+                  end,
+    Key = case DefaultBucket == Bucket of
+              true ->
+                  default;
+              false ->
+                  Bucket
+          end,
+    NewDict = dict:store(Key, lists:member(backend_reap, BackendCaps), Dict),
+    build_bucket_to_backend_reap_capability_dict(DefaultBucket, Rest, NewDict).
+%% ================================================================================================= %%
+>>>>>>> develop-2.2.8
 
 %% ===================================================================
 %% Preflist utility functions
