@@ -48,13 +48,11 @@
          get_write_once/1,
          overload_reply/1,
          get_backend_config/3,
-<<<<<<< HEAD
          is_modfun_allowed/2]).
--export([report_hashtree_tokens/0, reset_hashtree_tokens/2]).
-=======
+
+-export([report_hashtree_tokens/0, reset_hashtree_tokens/2,
          is_modfun_allowed/2,
          backend_reap_mode/1]).
->>>>>>> develop-2.2.8
 
 -include_lib("riak_kv_vnode.hrl").
 
@@ -201,9 +199,6 @@ get_write_once(Bucket) ->
             Err
     end.
 
-<<<<<<< HEAD
-
-
 %% ===================================================================
 %% Hashtree token management functions
 %% ===================================================================
@@ -241,7 +236,6 @@ reset_hashtree_tokens(MinToken, MaxToken) when MaxToken >= MinToken ->
     lists:foreach(ResetTokenFun, OnlinePrimaries),
     ok.
 
-=======
 backend_reap_mode(Bucket) ->
     case maybe_get_backend_reap_threshold() of
         normal ->
@@ -276,7 +270,6 @@ maybe_get_backend_reap_threshold() ->
             {backend_reap, BackendreapThreshold}
     end.
 
-%% ================================================================================================= %%
 check_backend_reap_module_capability() ->
     case app_helper:get_env(riak_kv, backend_reap_module_capability, undefined) of
         undefined ->
@@ -309,7 +302,6 @@ find_all_backends_capabilities([{_,Backend,_}| Rest], Caps) ->
     {ok, BackendCaps} = Backend:capabilities(state),
     find_all_backends_capabilities(Rest, Caps++BackendCaps).
 
-%% ================================================================================================= %%
 check_backend_reap_core_capability() ->
     case app_helper:get_env(riak_kv, backend_reap_core_capability, false) of
         false ->
@@ -320,7 +312,6 @@ check_backend_reap_core_capability() ->
             true
     end.
 
-%% ================================================================================================= %%
 check_bucket(Bucket) ->
     case app_helper:get_env(riak_kv, storage_backend, undefined) of
         undefined ->
@@ -357,7 +348,6 @@ return_default_bucket_backend_capability(Dict) ->
             false
     end.
 
-%% ================================================================================================= %%
 build_bucket_to_backend_reap_capability_dict() ->
     case app_helper:get_env(riak_kv, multi_backend_default, undefined) of
         undefined ->
@@ -389,8 +379,6 @@ build_bucket_to_backend_reap_capability_dict(DefaultBucket, [{Bucket, BackendMod
           end,
     NewDict = dict:store(Key, lists:member(backend_reap, BackendCaps), Dict),
     build_bucket_to_backend_reap_capability_dict(DefaultBucket, Rest, NewDict).
-%% ================================================================================================= %%
->>>>>>> develop-2.2.8
 
 %% ===================================================================
 %% Preflist utility functions
