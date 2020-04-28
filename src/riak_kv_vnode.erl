@@ -3306,7 +3306,7 @@ maybe_old_object(OldObject) ->
     OldObject.
 
 
--spec update_hashtree(binary(), binary(), riak_object:riak_object(), pid()) 
+-spec update_hashtree(binary(), binary(), riak_object:riak_object(), pid()).
 %% @doc
 %% Update hashtree based AAE when enabled.
 %% Note that this requires an object copy - the object has been converted from
