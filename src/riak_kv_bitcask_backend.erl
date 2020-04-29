@@ -45,6 +45,7 @@
          deactivate_backend/2,
          remove_backend/2,
          is_backend_active/2,
+         has_merged/2,
          fetch_metadata_backends/1,
          special_merge/3,
          reverse_merge/3,
@@ -605,16 +606,7 @@ check_backend_exists(Split, #state{ref = Ref}) ->
 
 
 activate_backend(Split, #state{ref = Ref} = State) ->
-    BState = erlang:get(Ref),
-    {default, DefRef, _DefHasMerged, _DefIsActive} = lists:keyfind(default, 1, element(2, BState)),
-    B2State = erlang:get(DefRef),
-    lager:info("Bitcask readfiles before wrap: ~p~n", [element(5,B2State)]),
     NewRef = bitcask_manager:activate_split(Ref, Split),
-    BState2 = erlang:get(NewRef),
-    {default, DefRef2, _DefHasMerged, _DefIsActive} = lists:keyfind(default, 1, element(2, BState2)),
-    B2State2 = erlang:get(DefRef2),
-    lager:info("Bitcask readfiles after wrap: ~p~n", [element(5,B2State2)]),
-
     {ok, State#state{ref = NewRef}}.
 
 deactivate_backend(Split, #state{ref = Ref} = State) ->
@@ -628,6 +620,9 @@ remove_backend(Split, #state{ref = Ref} = State) ->
 
 is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).
+
+has_merged(Split, #state{ref = Ref}) ->
+    bitcask_manager:has_merged(Ref, Split).
 
 -ifdef(TEST).
 fetch_metadata_backends(_Partition)->
