@@ -1012,8 +1012,8 @@ handle_command({remove_split_backend, _Partition, Name}, _, #state{modstate = Mo
                         false ->
                             {reply, ok, NewState}
                     end;
-                State ->
-                    lager:error("Vnode attempted to remove backend: ~p but it currently has the Active State as: ~p in bitcask~n", [Name, State]),
+                CurrentState ->
+                    lager:error("Vnode attempted to remove backend: ~p but it currently has the Active State as: ~p in bitcask~n", [Name, CurrentState]),
                     {reply, error, State}
             end
     end;
