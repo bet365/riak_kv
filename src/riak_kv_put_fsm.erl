@@ -1229,7 +1229,7 @@ get_soft_limit_option(Options) ->
     %% both the system (post forward) and the client (via options) can
     %% turn off soft-limit checking. However, by default, we should
     %% use them (if supported)
-    SoftLimitedWanted = get_option(mbox_check, Options, SoftLimitSupported),
+    SoftLimitedWanted = app_helper:get_env(riak_kv, mbox_check, SoftLimitSupported),
     SoftLimitedWanted.
 
 
