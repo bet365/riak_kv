@@ -1580,6 +1580,10 @@ special_merge_test() ->
 
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
+    ?MODULE:activate_backend(second_split, S1),
+
+    ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
+
     ok = stop(S1),
     os:cmd("rm -rf test/bitcask-backend/*").
 
