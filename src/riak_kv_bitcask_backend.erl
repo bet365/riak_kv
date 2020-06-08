@@ -180,6 +180,8 @@ start(Partition, Config0) ->
             end
     end.
 
+-spec start_split(string(), config(), no_upgrade | {upgrading, version()}, string(), string(), config(), integer(), integer()) ->
+    {ok, state()} | {error, term()}.
 start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn) ->
     case bitcask_manager:open(BitcaskDir, BitcaskOpts) of
         Ref when is_reference(Ref) ->
@@ -199,6 +201,8 @@ start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1
             {error, Reason1}
     end.
 
+-spec start_additional_split(list(atom(), atom()), state()) ->
+    {ok, state()} | {error, term()}.
 start_additional_split(Splits, State) when is_tuple(Splits) ->
     start_additional_split([Splits], State);
 start_additional_split([], State) ->
@@ -292,86 +296,6 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partit
                     lists:member(element(2, Reason), ?TERMINAL_POSIX_ERRORS),
             {error, Reason, State}
     end.
-
-add_split_opts(_Ref, Bucket, Opts, Partition) ->
-    case Bucket of
-        <<"undefined">> ->
-            Opts;
-        _ ->
-            check_md(Bucket, Opts, Partition)
-    end.
-
--ifdef(TEST).
-check_md(<<"second_split">> = Bucket, Opts, _Partition) ->
-    [{split, binary_to_atom(Bucket, latin1)} | Opts];
-check_md(_, Opts, _Partition) ->
-    Opts.
--else.
-check_md(Bucket, Opts, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
-        undefined ->
-            Opts;
-        BackendStates ->
-            case lists:keyfind(Partition, 1, BackendStates) of
-                false ->
-                    Opts;
-                {Partition, _} ->
-                    [{split, binary_to_atom(Bucket, latin1)} | Opts]
-            end
-    end.
--endif.
-
--ifdef(TEST).
-%% PArtition value 0 represents a false state in MD for testing. Partition value 1 represents active or special_merge.
-get_split(<<"second_split">>, _, 0, get) ->
-    <<"second_split">>;
-get_split(<<"second_split">>, _, 0, _) ->
-    <<"default">>;
-get_split(<<"second_split">>, _, 1, _) ->
-    <<"second_split">>;
-get_split(_, _, _, _) ->
-    <<"default">>.
--else.
-get_split(Bucket, Key, Partition, Op) ->
-    case get_md_state(Bucket, Key, Partition) of
-        undefined ->
-            <<"default">>;
-        {Split, active} ->
-            Split;
-        {Split, special_merge} ->
-            Split;
-        {Split, false} ->
-            case Op of
-                get ->
-                    Split;
-                _ ->
-                    <<"default">>
-            end
-    end.
-
-get_md_state(Bucket, Key, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
-        undefined ->
-            case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Key, latin1), node()}) of
-                undefined ->
-                    undefined;
-                BackendStates ->
-                    case lists:keyfind(Partition, 1, BackendStates) of
-                        false ->
-                            undefined;
-                        {Partition, State} ->
-                            {Key, State}
-                    end
-            end;
-        BackendStates ->
-            case lists:keyfind(Partition, 1, BackendStates) of
-                false ->
-                    undefined;
-                {Partition, State} ->
-                    {Bucket, State}
-            end
-    end.
--endif.
 
 %% @doc Delete an object from the bitcask backend
 %% NOTE: The bitcask backend does not currently support
@@ -568,6 +492,35 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
+-spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer()) -> ref().
+open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
+    case IsActive of
+        false ->
+            case HasMerged of
+                false ->
+                    bitcask_manager:open(Dir, Opts);
+                true ->
+                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                    Ref1 = bitcask_manager:open(Dir, Opts),
+                    bitcask_manager:open(Ref1, Dir, OpenOpts)
+            end;
+        true ->
+            case HasMerged of
+                true ->
+                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                    bitcask_manager:open(Dir, OpenOpts);
+                false ->
+                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                    Ref1 = bitcask_manager:open(Dir, Opts),
+                    bitcask_manager:open(Ref1, Dir, OpenOpts)
+            end;
+        eliminate ->
+            bitcask_manager:open(Dir, Opts)
+    end.
+
 %% @doc Delete all objects from this bitcask backend
 %% @TODO once bitcask has a more friendly drop function
 %%  of its own, use that instead.
@@ -601,29 +554,34 @@ status(#state{ref=Ref}) ->
     Return = bitcask_manager:status(Ref),
     lists:flatten([[{key_count, KeyCount}, {status, Status}] || {KeyCount, Status} <- Return]).
 
+-spec check_backend_exists(atom(), state()) -> boolean().
 check_backend_exists(Split, #state{ref = Ref}) ->
     bitcask_manager:check_backend_exists(Ref, Split).
 
-
+-spec activate_backend(atom(), state()) -> {ok, state()}.
 activate_backend(Split, #state{ref = Ref} = State) ->
     NewRef = bitcask_manager:activate_split(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
+-spec deactivate_backend(atom(), state()) -> {ok, state()}.
 deactivate_backend(Split, #state{ref = Ref} = State) ->
     NewRef = bitcask_manager:deactivate_split(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
+-spec remove_backend(atom(), state()) -> {ok, state()}.
 remove_backend(Split, #state{ref = Ref} = State) ->
     NewRef = bitcask_manager:close(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
-
+-spec is_backend_active(atom(), state()) -> atom().
 is_backend_active(Split, #state{ref = Ref}) ->
     bitcask_manager:is_active(Ref, Split).
 
+-spec has_merged(atom(), state()) -> atom().
 has_merged(Split, #state{ref = Ref}) ->
     bitcask_manager:has_merged(Ref, Split).
 
+-spec fetch_metadata_backends(integer()) -> list(atom(), atom()).
 -ifdef(TEST).
 fetch_metadata_backends(_Partition)->
     [].
@@ -658,7 +616,7 @@ iterate(Itr, Acc, Partition) ->
     end.
 -endif.
 
-
+-spec special_merge(atom(), atom(), state()) -> ok.
 special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
@@ -673,6 +631,7 @@ special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partiti
             lager:error("One or more of the backends scheduled for special_merge do not exist: ~p and ~p~n", [Split1, Split2])
     end.
 
+-spec special_merge(atom(), atom(), state()) -> ok.
 reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
@@ -785,11 +744,6 @@ make_bitcask_key(3, {Bucket, Split}, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
 
-%%make_bitcask_key(3, Bucket, Key) ->
-%%    SplitSz = size(Split),
-%%    BucketSz = size(Bucket),
-%%    <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
-
 
 
 
@@ -872,7 +826,7 @@ encode_disk_key(<<?VERSION_1:7, _Rest/bits>> = BitcaskKey, _Opts) ->
 encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey.
 
-%% TODO Needs updating to check against metadata!! Because all keys before a split is added will use default as the split name
+-spec find_split(riak_object:bucket(), riak_object:key(), atom()) -> atom().
 find_split(Key, undefined) ->
     case make_riak_key(Key) of
         {Split, {_Type, _Bucket}, _Key} ->
@@ -907,6 +861,7 @@ find_split(Key0, Partition) when is_integer(Partition) ->
 
 %%check_and_upgrade_key(default, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
 %%    KeyDirKey;
+-spec check_and_upgrade_key(atom(), binary()) -> binary().
 check_and_upgrade_key(Split, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
     case ?DECODE_BITCASK_KEY(KeyDirKey) of
         {{Bucket, Type}, Key} ->
@@ -1380,6 +1335,90 @@ finalize_upgrade(Dir) ->
                     {error, WriteErr}
             end
     end.
+
+-spec add_split_opts(ref(), riak_object:bucket(), config(), integer()) -> config().
+add_split_opts(_Ref, Bucket, Opts, Partition) ->
+    case Bucket of
+        <<"undefined">> ->
+            Opts;
+        _ ->
+            check_md(Bucket, Opts, Partition)
+    end.
+
+-spec check_md(riak_object:bucket(), config(), integer()) -> config().
+-ifdef(TEST).
+check_md(<<"second_split">> = Bucket, Opts, _Partition) ->
+    [{split, binary_to_atom(Bucket, latin1)} | Opts];
+check_md(_, Opts, _Partition) ->
+    Opts.
+-else.
+check_md(Bucket, Opts, Partition) ->
+    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
+        undefined ->
+            Opts;
+        BackendStates ->
+            case lists:keyfind(Partition, 1, BackendStates) of
+                false ->
+                    Opts;
+                {Partition, _} ->
+                    [{split, binary_to_atom(Bucket, latin1)} | Opts]
+            end
+    end.
+-endif.
+
+-spec get_split(riak_object:bucket(), riak_object:key(), integer(), atom()) -> riak_object:bucket() | riak_object:key().
+-ifdef(TEST).
+%% Partition value 0 represents a false state in MD for testing. Partition value 1 represents active or special_merge.
+get_split(<<"second_split">>, _, 0, get) ->
+    <<"second_split">>;
+get_split(<<"second_split">>, _, 0, _) ->
+    <<"default">>;
+get_split(<<"second_split">>, _, 1, _) ->
+    <<"second_split">>;
+get_split(_, _, _, _) ->
+    <<"default">>.
+-else.
+get_split(Bucket, Key, Partition, Op) ->
+    case get_md_state(Bucket, Key, Partition) of
+        undefined ->
+            <<"default">>;
+        {Split, active} ->
+            Split;
+        {Split, special_merge} ->
+            Split;
+        {Split, false} ->
+            case Op of
+                get ->
+                    Split;
+                _ ->
+                    <<"default">>
+            end
+    end.
+
+-spec get_md_state(riak_object:bucket(), riak_object:key(), integer()) -> {binary(), atom()} | undefined.
+get_md_state(Bucket, Key, Partition) ->
+    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
+        undefined ->
+            case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Key, latin1), node()}) of
+                undefined ->
+                    undefined;
+                BackendStates ->
+                    case lists:keyfind(Partition, 1, BackendStates) of
+                        false ->
+                            undefined;
+                        {Partition, State} ->
+                            {Key, State}
+                    end
+            end;
+        BackendStates ->
+            case lists:keyfind(Partition, 1, BackendStates) of
+                false ->
+                    undefined;
+                {Partition, State} ->
+                    {Bucket, State}
+            end
+    end.
+-endif.
 %% ===================================================================
 %% EUnit tests
 %% ===================================================================
