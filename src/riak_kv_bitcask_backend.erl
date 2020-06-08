@@ -201,7 +201,7 @@ start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1
             {error, Reason1}
     end.
 
--spec start_additional_split(list(atom(), atom()), state()) ->
+-spec start_additional_split([{atom(), atom()}], state()) ->
     {ok, state()} | {error, term()}.
 start_additional_split(Splits, State) when is_tuple(Splits) ->
     start_additional_split([Splits], State);
@@ -492,7 +492,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
--spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer()) -> ref().
+-spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer()) -> reference().
 open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
     case IsActive of
         false ->
@@ -581,7 +581,7 @@ is_backend_active(Split, #state{ref = Ref}) ->
 has_merged(Split, #state{ref = Ref}) ->
     bitcask_manager:has_merged(Ref, Split).
 
--spec fetch_metadata_backends(integer()) -> list(atom(), atom()).
+-spec fetch_metadata_backends(integer()) -> [{atom(), atom()}].
 -ifdef(TEST).
 fetch_metadata_backends(_Partition)->
     [].
@@ -631,7 +631,7 @@ special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partiti
             lager:error("One or more of the backends scheduled for special_merge do not exist: ~p and ~p~n", [Split1, Split2])
     end.
 
--spec special_merge(atom(), atom(), state()) -> ok.
+-spec reverse_merge(atom(), atom(), state()) -> ok.
 reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
@@ -826,7 +826,7 @@ encode_disk_key(<<?VERSION_1:7, _Rest/bits>> = BitcaskKey, _Opts) ->
 encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey.
 
--spec find_split(riak_object:bucket(), riak_object:key(), atom()) -> atom().
+-spec find_split(riak_object:bucket() | riak_object:key(), atom()) -> atom().
 find_split(Key, undefined) ->
     case make_riak_key(Key) of
         {Split, {_Type, _Bucket}, _Key} ->
@@ -1336,7 +1336,7 @@ finalize_upgrade(Dir) ->
             end
     end.
 
--spec add_split_opts(ref(), riak_object:bucket(), config(), integer()) -> config().
+-spec add_split_opts(reference(), riak_object:bucket(), config(), integer()) -> config().
 add_split_opts(_Ref, Bucket, Opts, Partition) ->
     case Bucket of
         <<"undefined">> ->
