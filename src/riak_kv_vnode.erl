@@ -665,42 +665,49 @@ repair_filter(Target) ->
                                 riak_core_bucket:default_object_nval(),
                                 fun object_info/1).
 
+-spec update_metadata({atom(), atom()}, integer()) -> ok.
 update_metadata({Name, Type}, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {update_metadata, Partition, {Name, Type}, node()},
         riak_kv_vnode_master,
         infinity).
 
+-spec add_split_backend(atom(), integer()) -> ok.
 add_split_backend(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {add_split_backend, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
+-spec remove_split_backend(atom(), integer()) -> ok.
 remove_split_backend(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {remove_split_backend, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
+-spec activate_split_backend(atom(), integer()) -> ok.
 activate_split_backend(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {activate_split_backend, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
+-spec deactivate_split_backend(atom(), integer()) -> ok.
 deactivate_split_backend(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {deactivate_split_backend, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
+-spec special_merge(atom(), integer()) -> ok.
 special_merge(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {special_merge, Partition, Name},
         riak_kv_vnode_master,
         infinity).
 
+-spec reverse_merge(atom(), integer()) -> ok.
 reverse_merge(Name, Partition) ->
     riak_core_vnode_master:sync_command({Partition, node()},
         {reverse_merge, Partition, Name},
