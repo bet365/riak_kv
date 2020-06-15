@@ -551,8 +551,8 @@ is_empty(#state{ref=Ref}) ->
 %% @doc Get the status information for this bitcask backend
 -spec status(state()) -> [{atom(), term()}].
 status(#state{ref=Ref}) ->
-    Return = bitcask_manager:status(Ref),
-    lists:flatten([[{key_count, KeyCount}, {status, Status}] || {KeyCount, Status} <- Return]).
+    {KeyCount, Status} = bitcask_manager:status(Ref),
+    [{key_count, KeyCount}, {status, Status}].
 
 -spec check_backend_exists(atom(), state()) -> boolean().
 check_backend_exists(Split, #state{ref = Ref}) ->
