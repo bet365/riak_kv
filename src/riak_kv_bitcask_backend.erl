@@ -365,8 +365,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          root=DataRoot,
                                          partition = Partition}) ->
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
-    NewOpts0 = add_split_opts(Bucket, Opts, Partition),
-    FoldOpts = build_bitcask_fold_opts(NewOpts0),
+    FoldOpts = build_bitcask_fold_opts(Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
     lager:info("List keys, bucket: ~p and state: ~p and Opts: ~p", [Bucket, erlang:get(Ref)]),
     case lists:member(async_fold, Opts) of
@@ -376,9 +375,9 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
             IsActive = bitcask_manager:is_active(Ref, binary_to_atom(Bucket, latin1)),
             NewOpts = case {IsActive, HasMerged} of
                           {false, false} ->
-                              Opts;
+                              FoldOpts;
                           _ ->
-                              [{split, binary_to_atom(Bucket, latin1)} | Opts]
+                              [{split, binary_to_atom(Bucket, latin1)} | FoldOpts]
                       end,
             KeyFolder =
                 fun() ->
@@ -386,7 +385,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                         case Ref1 of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask_manager:fold_keys(Ref1, FoldFun, Acc, FoldOpts)
+                                    bitcask_manager:fold_keys(Ref1, FoldFun, Acc, NewOpts)
                                 after
                                     bitcask_manager:close(Ref1)
                                 end;
@@ -405,40 +404,12 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
-open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
-    case IsActive of
-        false ->
-            case HasMerged of
-                false ->
-                    bitcask_manager:open(Dir, Opts);
-                true ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
-                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    Ref1 = bitcask_manager:open(Dir, Opts),
-                    bitcask_manager:open(Ref1, Dir, OpenOpts)
-            end;
-        true ->
-            case HasMerged of
-                true ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
-                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    bitcask_manager:open(Dir, OpenOpts);
-                false ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
-                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    Ref1 = bitcask_manager:open(Dir, Opts),
-                    bitcask_manager:open(Ref1, Dir, OpenOpts)
-            end;
-        eliminate ->
-            bitcask_manager:open(Dir, Opts)
-    end.
-
 build_bitcask_fold_opts(Opts) ->
     case lists:member(ignore_deletes_with_expiry, Opts) of
         true ->
             [{ignore_tstamp_expire_keys, true}];
         false ->
-            []
+            lists:delete(ignore_deletes_with_expiry, Opts)
     end.
 
 
@@ -500,7 +471,7 @@ open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
                 false ->
                     bitcask_manager:open(Dir, Opts);
                 true ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
                     Ref1 = bitcask_manager:open(Dir, Opts),
                     bitcask_manager:open(Ref1, Dir, OpenOpts)
@@ -508,11 +479,11 @@ open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
         true ->
             case HasMerged of
                 true ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
                     bitcask_manager:open(Dir, OpenOpts);
                 false ->
-                    SplitOpts = add_split_opts(ref, Bucket, Opts, Partition),
+                    SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
                     Ref1 = bitcask_manager:open(Dir, Opts),
                     bitcask_manager:open(Ref1, Dir, OpenOpts)
@@ -1336,8 +1307,8 @@ finalize_upgrade(Dir) ->
             end
     end.
 
--spec add_split_opts(reference(), riak_object:bucket(), config(), integer()) -> config().
-add_split_opts(_Ref, Bucket, Opts, Partition) ->
+-spec add_split_opts(riak_object:bucket(), config(), integer()) -> config().
+add_split_opts(Bucket, Opts, Partition) ->
     case Bucket of
         <<"undefined">> ->
             Opts;
