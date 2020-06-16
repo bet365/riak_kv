@@ -395,7 +395,8 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, KeyFolder};
         false ->
-            FoldResult = bitcask_manager:fold_keys(Ref, FoldFun, Acc, FoldOpts),
+            NewOpts = add_split_opts(Bucket, FoldOpts, Partition),
+            FoldResult = bitcask_manager:fold_keys(Ref, FoldFun, Acc, NewOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -1701,9 +1702,13 @@ split_fold_keys_test() ->
 
     AsyncKeys2 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff2()]),
     Keys2  = lists:flatten([X || {_, X, _, _, _} <- Buff2]),
+%%    Keys2  = element(2, Buff2),
+    ct:pal("AsyncBuff2: ~p~n", [AsyncBuff2()]),
+    ct:pal("Buff2: ~p~n", [Buff2]),
 
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys2)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
+
 
     ok = ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
 
@@ -1748,6 +1753,7 @@ split_fold_keys_test() ->
     os:cmd("rm -rf test/bitcask-backend/*").
 
 full_split_test() ->
+    ct:pal("########################### FULL_SPLIT_TEST ##################"),
     os:cmd("rm -rf test/bitcask-backend/*"),
     Opts = [{data_root, "test/bitcask-backend"}, {max_file_size, 10}],
     TstampExpire = bitcask_time:tstamp() - 1000,

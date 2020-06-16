@@ -4343,10 +4343,8 @@ rollover_test_() ->
 
 always_v1_test() ->
              riak_kv_test_util:stop_process(riak_core_metadata_events),
-    riak_core_metadata_events:start_link(),
     riak_kv_test_util:stop_process(riak_core_metadata_events),
     % Confirm that the leveled backend will always be a v1 object
-    riak_core_metadata_events:start_link(),
 %%    DataDir = filename:join(bitcask_test_dir(), "0"),
     ObjFmt = object_format(riak_kv_leveled_backend, undefined),
     riak_kv_test_util:stop_process(riak_core_metadata_events),
