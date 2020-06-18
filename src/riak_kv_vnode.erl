@@ -786,7 +786,7 @@ init([Index]) ->
     MDCacheSize = app_helper:get_env(riak_kv, vnode_md_cache_size),
 
     CallbackFun = fun(Key) -> riak_kv_vnode:update_metadata(Key, Index) end,
-    riak_core_metadata_events:add_sup_callback(CallbackFun),
+%%    riak_core_metadata_events:add_sup_callback(CallbackFun),
 
     MDCache =
         case MDCacheSize of
