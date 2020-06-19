@@ -196,7 +196,7 @@ start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1
                 partition=Partition,
                 key_vsn=KeyVsn}};
         {error, Reason1} ->
-            lager:error("Failed to start bitcask backend: ~p\n",
+            lager:error("Failed to start bitcask backend: ~p~n",
                 [Reason1]),
             {error, Reason1}
     end.
@@ -943,7 +943,6 @@ fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         lager:info("fold_keys_fun make222 key: ~p~n", [make_riak_key(BK)]),
-        ct:pal("fold_keys_fun make222 key: ~p and bucket: ~p~n", [make_riak_key(BK), Bucket]),
         case make_riak_key(BK) of
             {_S, B, Key} ->
                 case B =:= Bucket of
