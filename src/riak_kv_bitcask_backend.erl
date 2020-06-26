@@ -164,7 +164,6 @@ start(Partition, Config0) ->
                             false ->
                                 []
                         end,
-                    lager:info("backends to start: ~p~n", [Backends]),
                     case Backends of
                         [] ->
                             start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn);
@@ -208,7 +207,6 @@ start_additional_split(Splits, State) when is_tuple(Splits) ->
 start_additional_split([], State) ->
     {ok, State};
 start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_dir=DataDir, root=DataRoot, opts=BitcaskOpts} = State) ->
-    lager:info("Split starting: ~p~n", [Split]),
     BitcaskDir = filename:join(DataRoot, DataDir),
     NewActiveStatusOpts = case ActiveStatus of
                           active ->
@@ -219,7 +217,6 @@ start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_di
                               [{is_active, false}]
                       end,
     NewOpts = lists:flatten([{split, Split}, NewActiveStatusOpts | BitcaskOpts]),
-    lager:info("New backend being started: ~p~n", [{Split, ActiveStatus}]),
     NewRef = bitcask_manager:open(Ref, BitcaskDir, NewOpts),
     start_additional_split(Rest, State#state{ref = NewRef}).
 
@@ -242,7 +239,6 @@ get(Bucket, Key, State) ->
     get(Bucket, Key, State, []).
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = Partition}=State, Opts) ->
     Split = get_split(Bucket, Key, Partition, get),
-    lager:info("Split for get: ~p~n", [Split]),
     BitcaskKey = make_bitcask_key(KVers, {Bucket, Split}, Key),
     case bitcask_manager:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
         {ok, Value} ->
@@ -367,7 +363,6 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldOpts = build_bitcask_fold_opts(Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
-    lager:info("List keys, bucket: ~p and state: ~p and Opts: ~p", [Bucket, erlang:get(Ref)]),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
@@ -424,7 +419,6 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                ref=Ref,
                                                root=DataRoot,
                                                partition = Partition}) ->
-    lager:info("FoldObjects triggered"),
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
     FoldOpts = build_bitcask_fold_opts(Opts),
@@ -817,9 +811,8 @@ find_split(Key0, Partition) when is_integer(Partition) ->
         {_Split, {_Type, Bucket}, Key} ->
             Split1 = get_split(Bucket, Key, Partition, find_split),
             binary_to_atom(Split1, latin1);
-        {Split, Bucket, Key} ->
+        {_Split, Bucket, Key} ->
             Split1 = get_split(Bucket, Key, Partition, find_split),
-            lager:info("Find Split. Decoded: ~p vs MDreturned State: ~p~n", [Split, Split1]),
             binary_to_atom(Split1, latin1);
         {{_Type, Bucket}, Key} ->
             Split1 = get_split(Bucket, Key, Partition, find_split),
@@ -849,8 +842,7 @@ check_and_upgrade_key(Split0, <<?VERSION_3:7, _Rest/bitstring>> = KeyDirKey) ->
             ?ENCODE_BITCASK_KEY(3, {Type, Bucket, atom_to_binary(Split0, latin1)}, Key);
         {Split0, _Bucket, _Key} ->
             KeyDirKey;
-        {Split1, Bucket, Key} ->
-            lager:info("Upgrade fun, Decoded split: ~p and split to encode with: ~p~n", [Split1, atom_to_binary(Split0, latin1)]),
+        {_Split1, Bucket, Key} ->
             ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split0, latin1)}, Key)
     end;
 check_and_upgrade_key(_Split, KeyDirKey) ->
@@ -867,15 +859,13 @@ merge_check(Ref, BitcaskRoot, BitcaskOpts) ->
         {0, _} ->
             MaxMergeSize = app_helper:get_env(riak_kv,
                                               bitcask_max_merge_size),
-            BState = erlang:get(Ref),
-            {default, DefRef, _, _} = lists:keyfind(default, 1, element(2, BState)),
-            DefState = erlang:get(DefRef),
-            lager:info("Redfiles of Default before merge check is called: ~p~n", [element(5, DefState)]),
+%%            BState = erlang:get(Ref),
+%%            {default, _DefRef, _, _} = lists:keyfind(default, 1, element(2, BState)),
+%%            DefState = erlang:get(DefRef),
 
 
             case bitcask_manager:needs_merge(Ref, [{max_merge_size, MaxMergeSize}]) of
                 {true, Files} ->
-                    lager:info("Calling merge with ref state: ~p and files: ~p~n", [erlang:get(Ref), Files]),
                     bitcask_merge_worker:merge(BitcaskRoot, BitcaskOpts, Files);
                 false ->
                     ok
@@ -932,7 +922,6 @@ fold_buckets_fun(FoldBucketsFun) ->
 %% Return a function to fold over keys on this backend
 fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-        lager:info("fold_keys_fun make key: ~p~n", [make_riak_key(BK)]),
         case make_riak_key(BK) of
             {_S, Bucket, Key} ->
                 FoldKeysFun(Bucket, Key, Acc);
@@ -942,7 +931,6 @@ fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
     end;
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
-        lager:info("fold_keys_fun make222 key: ~p~n", [make_riak_key(BK)]),
         case make_riak_key(BK) of
             {_S, B, Key} ->
                 case B =:= Bucket of

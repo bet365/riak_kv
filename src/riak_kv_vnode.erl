@@ -785,7 +785,7 @@ init([Index]) ->
     AsyncFolding = app_helper:get_env(riak_kv, async_folds, true) == true,
     MDCacheSize = app_helper:get_env(riak_kv, vnode_md_cache_size),
 
-    CallbackFun = fun(Key) -> riak_kv_vnode:update_metadata(Key, Index) end,
+%%    CallbackFun = fun(Key) -> riak_kv_vnode:update_metadata(Key, Index) end,
 %%    riak_core_metadata_events:add_sup_callback(CallbackFun),
 
     MDCache =
@@ -1012,8 +1012,7 @@ handle_command({remove_split_backend, _Partition, Name}, _, #state{modstate = Mo
                 true ->
                     lager:error("Vnode attempted to remove backend: ~p but it currently has the Active State as: ~p in bitcask~n", [Name, true]),
                     {reply, error, State};
-                CurrentState ->
-                    lager:info("Vnode removing backend: ~p current active state: ~p", [Name, CurrentState]),
+                _CurrentState ->
                     {ok, NewModState} = riak_kv_bitcask_backend:remove_backend(Name, ModState),
                     NewState = State#state{modstate = NewModState},
                     case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
