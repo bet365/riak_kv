@@ -571,7 +571,7 @@ iterate(Itr, Acc, Partition) ->
                         [Val1] ->
                             case lists:keyfind(Partition, 1, Val1) of
                                 {Partition, State} ->
-                                    iterate(NewItr, [{Key, State} | Acc], Partition);
+                                    iterate(NewItr, [{binary_to_atom(Key, latin1), State} | Acc], Partition);
                                 false ->
                                     iterate(NewItr, Acc, Partition)
                             end
@@ -1312,7 +1312,7 @@ check_md(_, Opts, _Partition) ->
     Opts.
 -else.
 check_md(Bucket, Opts, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {Bucket, node()}) of
         undefined ->
             Opts;
         BackendStates ->
@@ -1356,9 +1356,9 @@ get_split(Bucket, Key, Partition, Op) ->
 
 -spec get_md_state(riak_object:bucket(), riak_object:key(), integer()) -> {binary(), atom()} | undefined.
 get_md_state(Bucket, Key, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Bucket, latin1), node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {Bucket, node()}) of
         undefined ->
-            case riak_core_metadata:get({split_backend, splits}, {binary_to_atom(Key, latin1), node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {Key, node()}) of
                 undefined ->
                     undefined;
                 BackendStates ->

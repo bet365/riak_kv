@@ -642,10 +642,10 @@ add_split_backend_local([Name, Partition]) when is_list(Name) andalso is_list(Pa
 add_split_backend_local(Name) ->
     {ok, R} = riak_core_ring_manager:get_my_ring(),
     Partitions = riak_core_ring:my_indices(R),
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             [riak_kv_vnode:add_split_backend(Name, Partition) || Partition <- Partitions],
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Failed to create backend: ~p on all Partitions~n", [Name]),
                     ok;
@@ -660,7 +660,7 @@ add_split_backend_local(Name) ->
                     ok;
                 NewParts ->
                     [riak_kv_vnode:add_split_backend(Name, Partition) || Partition <- NewParts],
-                    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                         undefined ->
                             io:format("Failed to create backend: ~p on select Partitions~n", [Name]),
                             error;
@@ -672,10 +672,10 @@ add_split_backend_local(Name) ->
     end.
 
 add_split_backend_local(Name, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             riak_kv_vnode:add_split_backend(Name, Partition),
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Failed to create backend: ~p on Partition: ~p~n", [Name, Partition]),
                     ok;
@@ -687,7 +687,7 @@ add_split_backend_local(Name, Partition) ->
             case lists:keyfind(Partition, 1, Statuses) of
                 false ->
                     riak_kv_vnode:add_split_backend(Name, Partition),
-                    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                         undefined ->
                             io:format("Failed to create backend: ~p on Partition: ~p~n", [Name, Partition]),
                             ok;
@@ -709,7 +709,7 @@ activate_split_backend_local(Name) when is_atom(Name) ->
     {ok, R} = riak_core_ring_manager:get_my_ring(),
     Partitions = riak_core_ring:my_indices(R),
     PLength = length(Partitions),
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist for this node so cannot be activated~n", [Name]),
             error;
@@ -724,7 +724,7 @@ activate_split_backend_local(Name) when is_atom(Name) ->
                     end
                 end, [], Partitions),
             RLength = length(Responses),
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p attampted to be activated but is no longer in metadata please investigate~n", [Name]),
                     error;
@@ -748,7 +748,7 @@ activate_split_backend_local(Name) when is_atom(Name) ->
     end.
 
 activate_split_backend_local(Name, Partition) when is_atom(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist on this node so cannot be activated~n", [Name]),
             error;
@@ -765,7 +765,7 @@ activate_split_backend_local(Name, Partition) when is_atom(Name) ->
                     ok;
                 {Partition, false} ->
                     ok = riak_kv_vnode:activate_split_backend(Name, Partition),
-                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     case lists:keyfind(Partition, 1, BackendStatus1) of
                         false ->
                             io:format("Failed to activate backend: ~p Please investigate", [Name]),
@@ -788,7 +788,7 @@ deactivate_split_backend_local(Name) when is_atom(Name) ->
     {ok, R} = riak_core_ring_manager:get_my_ring(),
     Partitions = riak_core_ring:my_indices(R),
     PLength = length(Partitions),
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist for this node so cannot be deactivated~n", [Name]),
             error;
@@ -803,7 +803,7 @@ deactivate_split_backend_local(Name) when is_atom(Name) ->
                     end
                 end, [], Partitions),
             RLength = length(Responses),
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p attampted to be deactivated but is no longer in metadata please investigate~n", [Name]),
                     error;
@@ -827,7 +827,7 @@ deactivate_split_backend_local(Name) when is_atom(Name) ->
     end.
 
 deactivate_split_backend_local(Name, Partition) when is_atom(Name) ->
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist on this node so cannot be deactivated~n", [Name]),
             error;
@@ -841,7 +841,7 @@ deactivate_split_backend_local(Name, Partition) when is_atom(Name) ->
                     ok;
                 _ -> %% Can be deactivated if active or special_merge state
                     ok = riak_kv_vnode:deactivate_split_backend(Name, Partition),
-                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     case lists:keyfind(Partition, 1, BackendStatus1) of
                         false ->
                             io:format("Failed to deactivate backend: ~p It is no longer in metadata please investigate", [Name]),
@@ -865,7 +865,7 @@ special_merge_local([Name, Partition]) when is_list(Name) andalso is_list(Partit
 special_merge_local(Name) ->
     {ok, R} = riak_core_ring_manager:get_my_ring(),
     Partitions = riak_core_ring:my_indices(R),
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist so cannot be special_merged~n", [Name]),
             error;
@@ -880,7 +880,7 @@ special_merge_local(Name) ->
                     end
                 end, [], Partitions),
             RLength = length(Responses),
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p attempted to be special_merge but is no longer in metadata please investigate~n", [Name]),
                     error;
@@ -904,7 +904,7 @@ special_merge_local(Name) ->
     end.
 
 special_merge_local(Name, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist on this node so cannot be special merged~n", [Name]),
             error;
@@ -921,7 +921,7 @@ special_merge_local(Name, Partition) ->
                     ok;
                 {Partition, active} ->
                     ok = riak_kv_vnode:special_merge(Name, Partition),
-                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     case lists:keyfind(Partition, 1, BackendStatus1) of
                         false ->
                             io:format("Failed to special_merge backend: ~p Please investigate", [Name]),
@@ -945,13 +945,13 @@ reverse_merge_local([Name, Partition]) when is_list(Name) andalso is_list(Partit
 reverse_merge_local(Name) ->
     {ok, R} = riak_core_ring_manager:get_my_ring(),
     Partitions = riak_core_ring:my_indices(R),
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist so cannot be reverse_merged~n", [Name]),
             error;
         BackendStatus when length(BackendStatus) =:= length(Partitions) ->
             [riak_kv_vnode:reverse_merge(Name, Partition) || Partition <- Partitions],
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p was succesfully reverse merged on all partitions and removed as a split backend~n", [Name]),
                     ok;
@@ -962,7 +962,7 @@ reverse_merge_local(Name) ->
     end.
 
 reverse_merge_local(Name, Partition) ->
-    case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+    case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
         undefined ->
             io:format("Backend: ~p does not exist on this node so cannot be reverse_merged~n", [Name]),
             error;
@@ -979,7 +979,7 @@ reverse_merge_local(Name, Partition) ->
                     ok;
                 {Partition, false} ->
                     ok = riak_kv_vnode:reverse_merge(Name, Partition),
-                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    BackendStatus1 = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     case lists:keyfind(Partition, 1, BackendStatus1) of
                         {Partition, special_merge} ->
                             io:format("Failed to reverse_merge backend: ~p  its still in 'special_merge' state. Please investigate", [Name]),
@@ -1014,7 +1014,7 @@ remove_split_backend_local(Name) ->
     PLength = length(Partitions),
     case RLength of
         PLength ->
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p has been succesfully removed from all partitions on this node~n", [Name]),
                     ok;
@@ -1030,7 +1030,7 @@ remove_split_backend_local(Name) ->
 remove_split_backend_local(Name, Partition) ->
     case riak_kv_vnode:remove_split_backend(Name, Partition) of
         ok ->
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
                     io:format("Backend: ~p does not exist at all in metadata but has been removed from bitcask", [Name]),
                     ok;

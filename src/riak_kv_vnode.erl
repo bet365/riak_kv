@@ -989,12 +989,12 @@ handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModSt
         false ->
             {ok, NewModState} = riak_kv_bitcask_backend:start_additional_split({Name, false}, ModState),
             NewState = State#state{modstate = NewModState},
-            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                 undefined ->
-                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, false}], [{propagate, false}]),
+                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, [{Partition, false}], [{propagate, false}]),
                     {reply, ok, NewState};
                 Backends ->
-                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, false} | Backends], [{propagate, false}]),
+                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, [{Partition, false} | Backends], [{propagate, false}]),
                     {reply, ok, NewState}
             end;
         true -> %% TODO If backend exists but is not in the metadata should we add it or not?
@@ -1037,13 +1037,13 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
                         {ok, NewModState} ->
                             lager:info("Vnode activated backend: ~p", [Name]),
                             NewState = State#state{modstate = NewModState},
-                            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                                 undefined ->
-                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, active}], [{propagate, false}]),
+                                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, [{Partition, active}], [{propagate, false}]),
                                     {reply, ok, NewState};
                                 Backends ->
                                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, active}),
-                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
                                     {reply, ok, NewState}
                             end;
                         Error ->
@@ -1068,13 +1068,13 @@ handle_command({deactivate_split_backend, Partition, Name}, _, #state{modstate  
                         {ok, NewModState} ->
                             lager:info("Vnode deactivating backend: ~p", [Name]),
                             NewState = State#state{modstate = NewModState},
-                            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                                 undefined ->
-                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, [{Partition, false}], [{propagate, false}]),
+                                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, [{Partition, false}], [{propagate, false}]),
                                     {reply, ok, NewState};
                                 Backends ->
                                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, false}),
-                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
                                     {reply, ok, NewState}
                             end;
                         Error ->
@@ -1094,9 +1094,9 @@ handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState}
                 true ->
                     lager:info("Vnode special_merging: ~p", [Name]),
                     ok = riak_kv_bitcask_backend:special_merge(default, Name, ModState),
-                    Backends = riak_core_metadata:get({split_backend, splits}, {Name, node()}),
+                    Backends = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, special_merge}),
-                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
                     {reply, ok, State};
                 false ->
                     lager:info("Vnode split backend: ~p is not active so cannot be special merged: ~p~n", [{Partition, Name}, ModState]),
@@ -1117,15 +1117,15 @@ handle_command({reverse_merge, Partition, Name}, _, #state{modstate  = ModState}
                         true ->
                             lager:info("Vnode reverse_merging: ~p~n", [Name]),
                             ok = riak_kv_bitcask_backend:reverse_merge(Name, default, ModState),
-                            case riak_core_metadata:get({split_backend, splits}, {Name, node()}) of
+                            case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                                 undefined ->
                                     {reply, ok, State};
                                 Backends when length(Backends) =:= 1 ->
-                                    riak_core_metadata:delete({split_backend, splits}, {Name, node()}),
+                                    riak_core_metadata:delete({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                                     {reply, ok, State};
                                 Backends ->
                                     NewBackends = lists:keydelete(Partition, 1, Backends),
-                                    riak_core_metadata:put({split_backend, splits}, {Name, node()}, NewBackends, [{propagate, false}]),
+                                    riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
                                     {reply, ok, State}
                             end;
                         false ->
