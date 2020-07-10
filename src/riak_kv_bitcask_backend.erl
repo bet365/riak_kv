@@ -429,7 +429,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             IsActive = bitcask_manager:is_active(Ref, binary_to_atom(Bucket, latin1)),
             NewOpts = case {IsActive, HasMerged} of
                           {false, false} ->
-                              Opts;
+                              FoldOpts;
                           _ ->
                               [{split, binary_to_atom(Bucket, latin1)} | FoldOpts]
                       end,
