@@ -97,7 +97,8 @@
                 opts :: [{atom(), term()}],
                 partition :: integer(),
                 root :: string(),
-                key_vsn :: integer()}).
+                key_vsn :: integer(),
+                bitcask_mod :: atom()}).
 
 -type state() :: #state{}.
 -type config() :: [{atom(), term()}].
@@ -166,9 +167,9 @@ start(Partition, Config0) ->
                         end,
                     case Backends of
                         [] ->
-                            start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn);
+                            start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn, bitcask);
                         _ ->
-                            {ok, State} = start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn),
+                            {ok, State} = start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn, bitcask_manager),
                             Return = start_additional_split(Backends, State),
                             Return
                     end;
@@ -179,10 +180,10 @@ start(Partition, Config0) ->
             end
     end.
 
--spec start_split(string(), config(), no_upgrade | {upgrading, version()}, string(), string(), config(), integer(), integer()) ->
+-spec start_split(string(), config(), no_upgrade | {upgrading, version()}, string(), string(), config(), integer(), integer(), atom()) ->
     {ok, state()} | {error, term()}.
-start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn) ->
-    case bitcask_manager:open(BitcaskDir, BitcaskOpts) of
+start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn, BitcaskMod) ->
+    case BitcaskMod:open(BitcaskDir, BitcaskOpts) of
         Ref when is_reference(Ref) ->
             check_fcntl(),
             schedule_merge(Ref),
@@ -193,7 +194,8 @@ start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1
                 root=DataRoot,
                 opts=BitcaskOpts1,
                 partition=Partition,
-                key_vsn=KeyVsn}};
+                key_vsn=KeyVsn,
+                bitcask_mod = BitcaskMod}};
         {error, Reason1} ->
             lager:error("Failed to start bitcask backend: ~p~n",
                 [Reason1]),
@@ -206,7 +208,7 @@ start_additional_split(Splits, State) when is_tuple(Splits) ->
     start_additional_split([Splits], State);
 start_additional_split([], State) ->
     {ok, State};
-start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_dir=DataDir, root=DataRoot, opts=BitcaskOpts} = State) ->
+start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_dir=DataDir, root=DataRoot, opts=BitcaskOpts, bitcask_mod = BitcaskMod} = State) ->
     BitcaskDir = filename:join(DataRoot, DataDir),
     NewActiveStatusOpts = case ActiveStatus of
                           active ->
@@ -217,17 +219,24 @@ start_additional_split([{Split, ActiveStatus} | Rest], #state{ref = Ref, data_di
                               [{is_active, false}]
                       end,
     NewOpts = lists:flatten([{split, Split}, NewActiveStatusOpts | BitcaskOpts]),
-    NewRef = bitcask_manager:open(Ref, BitcaskDir, NewOpts),
-    start_additional_split(Rest, State#state{ref = NewRef}).
+    BitcaskState = erlang:get(Ref),
+    case element(1, BitcaskState) of
+        state ->
+            NewRef = BitcaskMod:open(Ref, BitcaskDir, NewOpts),
+            start_additional_split(Rest, State#state{ref = NewRef});
+        bc_state ->
+            NewRef = bitcask_manager:open_with_existing(Ref,  BitcaskDir, NewOpts),
+            start_additional_split(Rest, State#state{ref = NewRef, bitcask_mod = bitcask_manager})
+    end.
 
 %% @doc Stop the bitcask backend
 -spec stop(state()) -> ok.
-stop(#state{ref=Ref}) ->
+stop(#state{ref=Ref, bitcask_mod = BitcaskMod}) ->
     case Ref of
         undefined ->
             ok;
         _ ->
-            bitcask_manager:close(Ref)
+            BitcaskMod:close(Ref)
     end.
 
 %% @doc Retrieve an object from the bitcask backend
@@ -237,10 +246,10 @@ stop(#state{ref=Ref}) ->
                  {error, term(), state()}.
 get(Bucket, Key, State) ->
     get(Bucket, Key, State, []).
-get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = Partition}=State, Opts) ->
+get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = Partition, bitcask_mod = BitcaskMod}=State, Opts) ->
     Split = get_split(Bucket, Key, Partition, get),
     BitcaskKey = make_bitcask_key(KVers, Bucket, Key),
-    case bitcask_manager:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
+    case BitcaskMod:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
         {ok, Value} ->
             {ok, Value, State};
         not_found  ->
@@ -263,11 +272,11 @@ get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = Partition}=State, Op
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), integer(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition, bitcask_mod = BitcaskMod}=State) ->
     Split = get_split(Bucket, PrimaryKey, Partition, put),
     BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
     Opts = [{?TSTAMP_EXPIRE_KEY, TstampExpire}, {split, binary_to_atom(Split, latin1)}],
-    case bitcask_manager:put(Ref, BitcaskKey, Val, Opts) of
+    case BitcaskMod:put(Ref, BitcaskKey, Val, Opts) of
         ok ->
             {ok, State};
         {error, Reason} ->
@@ -277,11 +286,11 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, TstampExpire, #state{ref=Ref, key_vsn=
 -spec put(riak_object:bucket(), riak_object:key(), [index_spec()], binary(), state()) ->
                  {ok, state()} |
                  {error, term(), state()}.
-put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition, bitcask_mod = BitcaskMod}=State) ->
     Split = get_split(Bucket, PrimaryKey, Partition, put),
     BitcaskKey = make_bitcask_key(KeyVsn, Bucket, PrimaryKey),
     Opts = [{split, binary_to_atom(Split, latin1)}],
-    case bitcask_manager:put(Ref, BitcaskKey, Val, Opts) of
+    case BitcaskMod:put(Ref, BitcaskKey, Val, Opts) of
         ok ->
             {ok, State};
         {error, Reason} ->
@@ -299,10 +308,10 @@ put(Bucket, PrimaryKey, _IndexSpecs, Val, #state{ref=Ref, key_vsn=KeyVsn, partit
 %% is ignored.
 -spec delete(riak_object:bucket(), riak_object:key(), [index_spec()], state()) ->
                     {ok, state()}.
-delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition}=State) ->
+delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn, partition = Partition, bitcask_mod = BitcaskMod}=State) ->
     Split = get_split(Bucket, Key, Partition, delete),
     BitcaskKey = make_bitcask_key(KeyVsn, Bucket, Key),
-    ok = bitcask_manager:delete(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)}]),
+    ok = BitcaskMod:delete(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)}]),
     {ok, State}.
 
 %% TODO Splits are per bucket for now. How do we decide which split we want to fold buckets for? Or do we want to check all splits (pass in {all_splits, true} option)?
@@ -314,7 +323,8 @@ delete(Bucket, Key, _IndexSpecs, #state{ref=Ref, key_vsn=KeyVsn, partition = Par
 fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                data_dir=DataFile,
                                                ref=Ref,
-                                               root=DataRoot}) ->
+                                               root=DataRoot,
+                                               bitcask_mod = BitcaskMod}) ->
     FoldFun = fold_buckets_fun(FoldBucketsFun),
     FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
@@ -323,16 +333,16 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
 
             BucketFolder =
                 fun() ->
-                        case bitcask_manager:open(filename:join(DataRoot, DataFile), ReadOpts) of
+                        case BitcaskMod:open(filename:join(DataRoot, DataFile), ReadOpts) of
                             Ref1 when is_reference(Ref1) ->
                                 try
                                     {Acc1, _} =
-                                        bitcask_manager:fold_keys(Ref1,
+                                        BitcaskMod:fold_keys(Ref1,
                                                           FoldFun,
                                                           {Acc, sets:new()}, FoldOpts),
                                         Acc1
                                 after
-                                    bitcask_manager:close(Ref1)
+                                    BitcaskMod:close(Ref1)
                                 end;
                             {error, Reason} ->
                                 {error, Reason}
@@ -341,7 +351,7 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
             {async, BucketFolder};
         false ->
             {FoldResult, _Bucketset} =
-                bitcask_manager:fold_keys(Ref, FoldFun, {Acc, sets:new()}, FoldOpts),
+                BitcaskMod:fold_keys(Ref, FoldFun, {Acc, sets:new()}, FoldOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -359,15 +369,16 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          data_dir=DataFile,
                                          ref=Ref,
                                          root=DataRoot,
-                                         partition = Partition}) ->
+                                         partition = Partition,
+                                         bitcask_mod = BitcaskMod}) ->
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldOpts = build_bitcask_fold_opts(Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
-            HasMerged = bitcask_manager:has_merged(Ref, binary_to_atom(Bucket, latin1)),
-            IsActive = bitcask_manager:is_active(Ref, binary_to_atom(Bucket, latin1)),
+            HasMerged = BitcaskMod:has_merged(Ref, binary_to_atom(Bucket, latin1)),
+            IsActive  = BitcaskMod:is_active(Ref, binary_to_atom(Bucket, latin1)),
             NewOpts = case {IsActive, HasMerged} of
                           {false, false} ->
                               FoldOpts;
@@ -376,13 +387,13 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                       end,
             KeyFolder =
                 fun() ->
-                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition),
+                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition, BitcaskMod),
                         case Ref1 of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    bitcask_manager:fold_keys(Ref1, FoldFun, Acc, NewOpts)
+                                    BitcaskMod:fold_keys(Ref1, FoldFun, Acc, NewOpts)
                                 after
-                                    bitcask_manager:close(Ref1)
+                                    BitcaskMod:close(Ref1)
                                 end;
                             {error, Reason} ->
                                 {error, Reason}
@@ -391,7 +402,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
             {async, KeyFolder};
         false ->
             NewOpts = add_split_opts(Bucket, FoldOpts, Partition),
-            FoldResult = bitcask_manager:fold_keys(Ref, FoldFun, Acc, NewOpts),
+            FoldResult = BitcaskMod:fold_keys(Ref, FoldFun, Acc, NewOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -418,15 +429,16 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                data_dir=DataFile,
                                                ref=Ref,
                                                root=DataRoot,
-                                               partition = Partition}) ->
+                                               partition = Partition,
+                                               bitcask_mod = BitcaskMod}) ->
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
     FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
-            HasMerged = bitcask_manager:has_merged(Ref, binary_to_atom(Bucket, latin1)),
-            IsActive = bitcask_manager:is_active(Ref, binary_to_atom(Bucket, latin1)),
+            HasMerged = BitcaskMod:has_merged(Ref, binary_to_atom(Bucket, latin1)),
+            IsActive  = BitcaskMod:is_active(Ref, binary_to_atom(Bucket, latin1)),
             NewOpts = case {IsActive, HasMerged} of
                           {false, false} ->
                               FoldOpts;
@@ -435,13 +447,13 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                       end,
             ObjectFolder =
                 fun() ->
-                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition),
+                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition, BitcaskMod),
                     case Ref1 of
                         Ref1 when is_reference(Ref1) ->
                             try
-                                bitcask_manager:fold(Ref1, FoldFun, Acc, NewOpts)
+                                BitcaskMod:fold(Ref1, FoldFun, Acc, NewOpts)
                             after
-                                bitcask_manager:close(Ref1)
+                                BitcaskMod:close(Ref1)
                             end;
                         {error, Reason} ->
                             {error, Reason}
@@ -450,7 +462,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             {async, ObjectFolder};
         false ->
             NewOpts = add_split_opts(Bucket, FoldOpts, Partition),
-            FoldResult = bitcask_manager:fold(Ref, FoldFun, Acc, NewOpts),
+            FoldResult = BitcaskMod:fold(Ref, FoldFun, Acc, NewOpts),
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -459,33 +471,33 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
--spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer()) -> reference().
-open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
+-spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer(), atom()) -> reference().
+open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition, BitcaskMod) ->
     case IsActive of
         false ->
             case HasMerged of
                 false ->
-                    bitcask_manager:open(Dir, Opts);
+                    BitcaskMod:open(Dir, Opts);
                 true ->
                     SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    Ref1 = bitcask_manager:open(Dir, Opts),
-                    bitcask_manager:open(Ref1, Dir, OpenOpts)
+                    Ref1 = BitcaskMod:open(Dir, Opts),
+                    BitcaskMod:open(Ref1, Dir, OpenOpts)
             end;
         true ->
             case HasMerged of
                 true ->
                     SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    bitcask_manager:open(Dir, OpenOpts);
+                    BitcaskMod:open(Dir, OpenOpts);
                 false ->
                     SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    Ref1 = bitcask_manager:open(Dir, Opts),
-                    bitcask_manager:open(Ref1, Dir, OpenOpts)
+                    Ref1 = BitcaskMod:open(Dir, Opts),
+                    BitcaskMod:open(Ref1, Dir, OpenOpts)
             end;
         eliminate ->
-            bitcask_manager:open(Dir, Opts)
+            BitcaskMod:open(Dir, Opts)
     end.
 
 %% @doc Delete all objects from this bitcask backend
@@ -494,9 +506,10 @@ open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition) ->
 -spec drop(state()) -> {ok, state()} | {error, term(), state()}.
 drop(#state{ref=Ref,
             partition=Partition,
-            root=DataRoot}=State) ->
+            root=DataRoot,
+            bitcask_mod = BitcaskMod}=State) ->
     %% Close the bitcask reference
-    bitcask_manager:close(Ref),
+    BitcaskMod:close(Ref),
 
     PartitionStr = integer_to_list(Partition),
     PartitionDir = filename:join([DataRoot, PartitionStr]),
@@ -508,45 +521,45 @@ drop(#state{ref=Ref,
 %% @doc Returns true if this bitcasks backend contains any
 %% non-tombstone values; otherwise returns false.
 -spec is_empty(state()) -> boolean().
-is_empty(#state{ref=Ref}) ->
+is_empty(#state{ref=Ref, bitcask_mod = BitcaskMod}) ->
     %% Estimate if we are empty or not as determining for certain
     %% requires a fold over the keyspace that may block. The estimate may
     %% return false when this bitcask is actually empty, but it will never
     %% return true when the bitcask has data.
-    bitcask_manager:is_empty_estimate(Ref).
+    BitcaskMod:is_empty_estimate(Ref).
 
 %% @doc Get the status information for this bitcask backend
 -spec status(state()) -> [{atom(), term()}].
-status(#state{ref=Ref}) ->
-    {KeyCount, Status} = bitcask_manager:status(Ref),
+status(#state{ref=Ref, bitcask_mod = BitcaskMod}) ->
+    {KeyCount, Status} = BitcaskMod:status(Ref),
     [{key_count, KeyCount}, {status, Status}].
 
 -spec check_backend_exists(atom(), state()) -> boolean().
-check_backend_exists(Split, #state{ref = Ref}) ->
-    bitcask_manager:check_backend_exists(Ref, Split).
+check_backend_exists(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
+    BitcaskMod:check_backend_exists(Ref, Split).
 
 -spec activate_backend(atom(), state()) -> {ok, state()}.
-activate_backend(Split, #state{ref = Ref} = State) ->
-    NewRef = bitcask_manager:activate_split(Ref, Split),
+activate_backend(Split, #state{ref = Ref, bitcask_mod = BitcaskMod} = State) ->
+    NewRef = BitcaskMod:activate_split(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
 -spec deactivate_backend(atom(), state()) -> {ok, state()}.
-deactivate_backend(Split, #state{ref = Ref} = State) ->
-    NewRef = bitcask_manager:deactivate_split(Ref, Split),
+deactivate_backend(Split, #state{ref = Ref,bitcask_mod = BitcaskMod} = State) ->
+    NewRef = BitcaskMod:deactivate_split(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
 -spec remove_backend(atom(), state()) -> {ok, state()}.
-remove_backend(Split, #state{ref = Ref} = State) ->
-    NewRef = bitcask_manager:close(Ref, Split),
+remove_backend(Split, #state{ref = Ref, bitcask_mod = BitcaskMod} = State) ->
+    NewRef = BitcaskMod:close(Ref, Split),
     {ok, State#state{ref = NewRef}}.
 
 -spec is_backend_active(atom(), state()) -> atom().
-is_backend_active(Split, #state{ref = Ref}) ->
-    bitcask_manager:is_active(Ref, Split).
+is_backend_active(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
+    BitcaskMod:is_active(Ref, Split).
 
 -spec has_merged(atom(), state()) -> atom().
-has_merged(Split, #state{ref = Ref}) ->
-    bitcask_manager:has_merged(Ref, Split).
+has_merged(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
+    BitcaskMod:has_merged(Ref, Split).
 
 -spec fetch_metadata_backends(integer()) -> [{atom(), atom()}].
 -ifdef(TEST).
@@ -584,13 +597,13 @@ iterate(Itr, Acc, Partition) ->
 -endif.
 
 -spec special_merge(atom(), atom(), state()) -> ok.
-special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
+special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition, bitcask_mod = BitcaskMod} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
             case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
                 {true, true} ->
                     Opts1 = [{partition, Partition} | Opts],
-                    bitcask_manager:special_merge(Ref, Split1, Split2, Opts1);
+                    BitcaskMod:special_merge(Ref, Split1, Split2, Opts1);
                 _ ->
                     lager:error("One or more of the backends scheduled for special_merge are not active: ~p and ~p~n", [Split1, Split2])
             end;
@@ -599,13 +612,13 @@ special_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partiti
     end.
 
 -spec reverse_merge(atom(), atom(), state()) -> ok.
-reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition} = State) ->
+reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partition, bitcask_mod = BitcaskMod} = State) ->
     case {check_backend_exists(Split1, State), check_backend_exists(Split2, State)} of
         {true, true} ->
             case {is_backend_active(Split1, State), is_backend_active(Split2, State)} of
                 {false, true} ->
                     Opts1 = [{partition, Partition} | Opts],
-                    bitcask_manager:reverse_merge(Ref, Split1, Split2, Opts1);
+                    BitcaskMod:reverse_merge(Ref, Split1, Split2, Opts1);
                 States ->
                     lager:error("One of the backends is not in the correct active state for reverse merge, Expected: {false, true}, Actual: ~p for backends: ~p~n", [States, {Split1, Split2}])
             end;
@@ -626,8 +639,8 @@ data_size(State) ->
 -spec callback(reference(), any(), state()) -> {ok, state()}.
 callback(Ref,
          {sync, SyncInterval},
-         #state{ref=Ref}=State) when is_reference(Ref) ->
-    bitcask_manager:sync(Ref),
+         #state{ref=Ref, bitcask_mod = BitcaskMod}=State) when is_reference(Ref) ->
+    BitcaskMod:sync(Ref),
     schedule_sync(Ref, SyncInterval),
     {ok, State};
 callback(Ref,
@@ -635,11 +648,11 @@ callback(Ref,
          #state{ref=Ref,
                 data_dir=DataDir,
                 opts=BitcaskOpts,
-                root=DataRoot}=State) when is_reference(Ref) ->
+                root=DataRoot, bitcask_mod = BitcaskMod}=State) when is_reference(Ref) ->
     case lists:member(riak_kv, riak_core_node_watcher:services(node())) of
         true ->
             BitcaskRoot = filename:join(DataRoot, DataDir),
-            merge_check(Ref, BitcaskRoot, BitcaskOpts);
+            merge_check(Ref, BitcaskRoot, BitcaskOpts, BitcaskMod);
         false ->
             lager:debug("Skipping merge check: KV service not yet up"),
             ok
@@ -855,7 +868,7 @@ find_split(Key0, Partition) when is_integer(Partition) ->
 %% ===================================================================
 
 % @private If no pending merges, check if files need to be merged.
-merge_check(Ref, BitcaskRoot, BitcaskOpts) ->
+merge_check(Ref, BitcaskRoot, BitcaskOpts, BitcaskMod) ->
     case bitcask_merge_worker:status() of
         {0, _} ->
             MaxMergeSize = app_helper:get_env(riak_kv,
@@ -865,7 +878,7 @@ merge_check(Ref, BitcaskRoot, BitcaskOpts) ->
 %%            DefState = erlang:get(DefRef),
 
 
-            case bitcask_manager:needs_merge(Ref, [{max_merge_size, MaxMergeSize}]) of
+            case BitcaskMod:needs_merge(Ref, [{max_merge_size, MaxMergeSize}]) of
                 {true, Files} ->
                     bitcask_merge_worker:merge(BitcaskRoot, BitcaskOpts, Files);
                 false ->
@@ -1498,14 +1511,14 @@ create_new_split_test() ->
     {ok, DataDirs} = file:list_dir(Path),
     Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
 
-    ?assertEqual(["default"], Dirs),
+    ?assertEqual([], Dirs),
 
     {ok, S1} = ?MODULE:start_additional_split({second, false}, S),
 
     {ok, DataDirs1} = file:list_dir(Path),
     Dirs1 = [Dir || Dir <- DataDirs1, Dir =/= "version.txt"],
 
-    ?assertEqual(["default", "second"], Dirs1),
+    ?assertEqual(["second"], Dirs1),
     ?assertEqual(true, check_backend_exists(second, S1)),
     ?assertEqual(false, is_backend_active(second, S1)),
 
@@ -1533,8 +1546,9 @@ split_data_test() ->
 
     Path = filename:join(["test/bitcask-backend", "0"]),
     {ok, DataDirs} = file:list_dir(Path),
-    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
-    ?assertEqual(["default", "second_split"], Dirs),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt", Dir =/= "second_split"],
+    ?assertNotEqual([], Dirs),
+    ?assertEqual(true, filelib:is_dir("test/bitcask-backend/0/second_split")),
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     ?MODULE:activate_backend(second_split, S1),
@@ -1571,8 +1585,9 @@ special_merge_test() ->
 
     Path = filename:join(["test/bitcask-backend", "0"]),
     {ok, DataDirs} = file:list_dir(Path),
-    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
-    ?assertEqual(["default", "second_split"], Dirs),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt", Dir =/= "second_split"],
+    ?assertNotEqual([], Dirs),
+    ?assertEqual(true, filelib:is_dir("test/bitcask-backend/0/second_split")),
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
@@ -1608,8 +1623,9 @@ split_merge_test() ->
 
     Path = filename:join(["test/bitcask-backend", "0"]),
     {ok, DataDirs} = file:list_dir(Path),
-    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt"],
-    ?assertEqual(["default", "second_split"], Dirs),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt", Dir =/= "second_split"],
+    ?assertNotEqual([], Dirs),
+    ?assertEqual(true, filelib:is_dir("test/bitcask-backend/0/second_split")),
     ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     %% Checking for merge files shows that when putting to split the same key in default location is deleted
@@ -1620,7 +1636,8 @@ split_merge_test() ->
 
     ?assertNotEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
-    {ok, BeforeMerge} = file:list_dir("test/bitcask-backend/0/default"),
+    {ok, BeforeMerge} = file:list_dir("test/bitcask-backend/0/"),
+    BeforeMergeFiles = [File || File <- BeforeMerge, File =/= "version.txt", File =/= "second_split"],
     BRef = S1#state.ref,
 
     ?MODULE:special_merge(default, second_split, S1#state{partition = 1}),
@@ -1630,8 +1647,8 @@ split_merge_test() ->
     ok = bitcask_merge_worker:merge(BitcaskRoot, [], MFiles),
     timer:sleep(2000),
 
-    {ok, AfterMerge} = file:list_dir("test/bitcask-backend/0/default"),
-    ?assert(length(AfterMerge) < length(BeforeMerge)),
+    {ok, AfterMerge} = file:list_dir("test/bitcask-backend/0/"),
+    ?assert(length(AfterMerge) < length(BeforeMergeFiles)),
 
     ok = stop(S1),
     os:cmd("rm -rf test/bitcask-backend/*").
