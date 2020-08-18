@@ -536,7 +536,12 @@ status(#state{ref=Ref, bitcask_mod = BitcaskMod}) ->
 
 -spec check_backend_exists(atom(), state()) -> boolean().
 check_backend_exists(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
-    BitcaskMod:check_backend_exists(Ref, Split).
+    case BitcaskMod of
+        bitcask ->
+            false;
+        bitcask_manager ->
+            BitcaskMod:check_backend_exists(Ref, Split)
+    end.
 
 -spec activate_backend(atom(), state()) -> {ok, state()}.
 activate_backend(Split, #state{ref = Ref, bitcask_mod = BitcaskMod} = State) ->
@@ -555,11 +560,23 @@ remove_backend(Split, #state{ref = Ref, bitcask_mod = BitcaskMod} = State) ->
 
 -spec is_backend_active(atom(), state()) -> atom().
 is_backend_active(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
-    BitcaskMod:is_active(Ref, Split).
+    case BitcaskMod of
+        bitcask ->
+            false;
+        bitcask_manager ->
+            BitcaskMod:check_backend_exists(Ref, Split)
+    end.
+%%    BitcaskMod:is_active(Ref, Split).
 
 -spec has_merged(atom(), state()) -> atom().
 has_merged(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
-    BitcaskMod:has_merged(Ref, Split).
+    case BitcaskMod of
+        bitcask ->
+            false;
+        bitcask_manager ->
+            BitcaskMod:check_backend_exists(Ref, Split)
+    end.
+%%    BitcaskMod:has_merged(Ref, Split).
 
 -spec fetch_metadata_backends(integer()) -> [{atom(), atom()}].
 -ifdef(TEST).
