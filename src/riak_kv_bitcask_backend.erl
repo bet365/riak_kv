@@ -564,7 +564,7 @@ is_backend_active(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
         bitcask ->
             false;
         bitcask_manager ->
-            BitcaskMod:check_backend_exists(Ref, Split)
+            BitcaskMod:is_active(Ref, Split)
     end.
 %%    BitcaskMod:is_active(Ref, Split).
 
@@ -574,7 +574,7 @@ has_merged(Split, #state{ref = Ref, bitcask_mod = BitcaskMod}) ->
         bitcask ->
             false;
         bitcask_manager ->
-            BitcaskMod:check_backend_exists(Ref, Split)
+            BitcaskMod:has_merged(Ref, Split)
     end.
 %%    BitcaskMod:has_merged(Ref, Split).
 
