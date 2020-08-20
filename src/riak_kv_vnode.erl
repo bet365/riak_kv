@@ -1093,11 +1093,11 @@ handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState}
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 true ->
                     lager:info("Vnode special_merging: ~p", [Name]),
-                    ok = riak_kv_bitcask_backend:special_merge(default, Name, ModState),
+                    {ok, NewModState} = riak_kv_bitcask_backend:special_merge(default, Name, ModState),
                     Backends = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, special_merge}),
                     riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
-                    {reply, ok, State};
+                    {reply, ok, State#state{modstate = NewModState}};
                 false ->
                     lager:info("Vnode split backend: ~p is not active so cannot be special merged: ~p~n", [{Partition, Name}, ModState]),
                     {reply, error, State}
@@ -1116,17 +1116,17 @@ handle_command({reverse_merge, Partition, Name}, _, #state{modstate  = ModState}
                     case riak_kv_bitcask_backend:has_merged(Name, ModState) of
                         true ->
                             lager:info("Vnode reverse_merging: ~p~n", [Name]),
-                            ok = riak_kv_bitcask_backend:reverse_merge(Name, default, ModState),
+                            {ok, NewModState} = riak_kv_bitcask_backend:reverse_merge(Name, default, ModState),
                             case riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}) of
                                 undefined ->
                                     {reply, ok, State};
                                 Backends when length(Backends) =:= 1 ->
                                     riak_core_metadata:delete({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
-                                    {reply, ok, State};
+                                    {reply, ok, State#state{modstate = NewModState}};
                                 Backends ->
                                     NewBackends = lists:keydelete(Partition, 1, Backends),
                                     riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
-                                    {reply, ok, State}
+                                    {reply, ok, State#state{modstate = NewModState}}
                             end;
                         false ->
                             lager:info("Vnode split backend: ~p has not yet been special merged so cannot reverse_merge: ~p~n", [{Partition, Name}, ModState]),
