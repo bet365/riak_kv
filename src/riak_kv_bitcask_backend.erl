@@ -49,6 +49,7 @@
          fetch_metadata_backends/1,
          special_merge/3,
          reverse_merge/3,
+         pause_merge/1,
          callback/3]).
 
 -export([data_size/1,
@@ -654,7 +655,7 @@ reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partiti
                 {false, true} ->
                     Opts1 = [{partition, Partition} | Opts],
                     BitcaskMod:reverse_merge(Ref, Split1, Split2, Opts1),
-                    %% TODO Do we want to remove it here or keep it, in bitcask_manager it gets set to eliminate but in MD it gets removed
+                    %%  TODO Do we want to remove it here or keep it, in bitcask_manager it gets set to eliminate but in MD it gets removed
                     NewBackends = lists:keyreplace(atom_to_binary(Split2, latin1), 1, Backends, {atom_to_binary(Split2, latin1), false}),
                     {ok, State#state{backends = NewBackends}};
                     States ->
@@ -662,6 +663,16 @@ reverse_merge(Split1, Split2, #state{opts = Opts, ref = Ref, partition = Partiti
             end;
         _ ->
             lager:error("One of the backends scheduled for reverse merge does not exist, backends: ~p~n", [Split1, Split2])
+    end.
+
+-spec pause_merge(state()) -> ok.
+pause_merge(#state{bitcask_mod = Mod}) ->
+    case Mod of
+        bitcask ->
+            ok;
+        bitcask_manager ->
+            Mod:pause_merge(),
+            ok
     end.
 
 %% @doc Get the size of the bitcask backend (in number of keys)
@@ -1914,11 +1925,54 @@ full_split_test() ->
     ok = stop(S5),
     os:cmd("rm -rf test/bitcask-backend/*").
 
+pause_merge_test() ->
+    ct:pal("########################### PAUSE_MERGE_TEST ##################"),
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {max_file_size, 50}, {merge_count, 3}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+    BRef = S1#state.ref,
 
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
 
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b2">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v3">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S1),
 
+    {ok, S2} = ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S2)),
 
--ifdef(EQC).
+    Path = filename:join(["test/bitcask-backend", "0"]),
+    {ok, DataDirs} = file:list_dir(Path),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt", Dir =/= "second_split"],
+    ?assertNotEqual([], Dirs),
+    ?assertEqual(true, filelib:is_dir("test/bitcask-backend/0/second_split")),
+    ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
+
+    %% Add pause_merge msg to bitcask msg queue and will exit special merge when count hits 3.
+    ?MODULE:pause_merge(S2),
+    ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
+
+    {ok, SecondDir1} = file:list_dir("test/bitcask-backend/0/second_split"),
+    SecondsFiles1 = [X || X <- SecondDir1, X =/= "bitcask.write.lock"],
+    ?assertEqual(4, length(SecondsFiles1)),
+
+    ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
+
+    {ok, SecondDir2} = file:list_dir("test/bitcask-backend/0/second_split"),
+    SecondsFiles2 = [X || X <- SecondDir2, X =/= "bitcask.write.lock"],
+    ?assertEqual(8, length(SecondsFiles2)),
+
+    ok = stop(S2),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
+    -ifdef(EQC).
 
 prop_bitcask_backend() ->
     Path = riak_kv_test_util:get_test_dir("bitcask-backend"),
