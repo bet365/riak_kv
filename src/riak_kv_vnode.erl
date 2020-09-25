@@ -998,7 +998,7 @@ handle_command({add_split_backend, Partition, Name}, _, #state{modstate  = ModSt
                     {reply, ok, NewState}
             end;
         true -> %% TODO If backend exists but is not in the metadata should we add it or not?
-            lager:info("Vnode attempted to start a split backend: ~p but it already exists in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to start a split backend: ~p but it already exists in ModState~n", [{Partition, Name}]),
             {reply, ok, State}
     end;
 
@@ -1030,7 +1030,7 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
         true ->
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 true ->
-                    lager:info("Vnode split backend: ~p is already active in ModState: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is already active in ModState~n", [{Partition, Name}]),
                     {reply, ok, State};  %% TODO Review if this should return error or not?
                 false ->
                     case riak_kv_bitcask_backend:activate_backend(Name, ModState) of
@@ -1052,7 +1052,7 @@ handle_command({activate_split_backend, Partition, Name}, _, #state{modstate  = 
                     end
             end;
         false ->
-            lager:info("Vnode attempted to activate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to activate a split backend: ~p but it does not exist in ModState~n", [{Partition, Name}]),
             {reply, error, State}
     end;
 
@@ -1061,7 +1061,7 @@ handle_command({deactivate_split_backend, Partition, Name}, _, #state{modstate  
         true ->
             case riak_kv_bitcask_backend:is_backend_active(Name, ModState) of
                 false ->
-                    lager:info("Vnode split backend: ~p is not in active state in ModState: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is not in active state in ModState~n", [{Partition, Name}]),
                     {reply, ok, State};  %% TODO Review if this should return error or not?
                 true ->
                     case riak_kv_bitcask_backend:deactivate_backend(Name, ModState) of
@@ -1083,7 +1083,7 @@ handle_command({deactivate_split_backend, Partition, Name}, _, #state{modstate  
                     end
             end;
         false ->
-            lager:info("Vnode attempted to deactivate a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to deactivate a split backend: ~p but it does not exist in ModState~n", [{Partition, Name}]),
             {reply, error, State}
     end;
 
@@ -1097,13 +1097,14 @@ handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState}
                     Backends = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, special_merge}),
                     riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
+                    ct:pal("after specila merge has speical_merged: ~p~n", [riak_kv_bitcask_backend:has_merged(Name, ModState)]),
                     {reply, ok, State#state{modstate = NewModState}};
                 false ->
-                    lager:info("Vnode split backend: ~p is not active so cannot be special merged: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is not active so cannot be special merged~n", [{Partition, Name}]),
                     {reply, error, State}
             end;
         false ->
-            lager:info("Vnode attempted to sepcial_merge a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to sepcial_merge a split backend: ~p but it does not exist in ModState~n", [{Partition, Name}]),
             {reply, error, State}
     end;
 
@@ -1129,15 +1130,15 @@ handle_command({reverse_merge, Partition, Name}, _, #state{modstate  = ModState}
                                     {reply, ok, State#state{modstate = NewModState}}
                             end;
                         false ->
-                            lager:info("Vnode split backend: ~p has not yet been special merged so cannot reverse_merge: ~p~n", [{Partition, Name}, ModState]),
+                            lager:info("Vnode split backend: ~p has not yet been special merged so cannot reverse_merge~n", [{Partition, Name}]),
                             {reply, ok, State}
                     end;
                 true ->
-                    lager:info("Vnode split backend: ~p is in active state so it can not be reverse merged back to default location: ~p~n", [{Partition, Name}, ModState]),
+                    lager:info("Vnode split backend: ~p is in active state so it can not be reverse merged back to default location~n", [{Partition, Name}]),
                     {reply, error, State}
             end;
         false ->
-            lager:info("Vnode attempted to reverse_merge a split backend: ~p but it does not exist in ModState: ~p~n", [{Partition, Name}, ModState]),
+            lager:info("Vnode attempted to reverse_merge a split backend: ~p but it does not exist in ModState~n", [{Partition, Name}]),
             {reply, error, State}
     end;
 
