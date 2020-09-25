@@ -1097,7 +1097,7 @@ handle_command({special_merge, Partition, Name}, _, #state{modstate  = ModState}
                     Backends = riak_core_metadata:get({split_backend, splits}, {atom_to_binary(Name, latin1), node()}),
                     NewBackends = lists:keyreplace(Partition, 1, Backends, {Partition, special_merge}),
                     riak_core_metadata:put({split_backend, splits}, {atom_to_binary(Name, latin1), node()}, NewBackends, [{propagate, false}]),
-                    ct:pal("after specila merge has speical_merged: ~p~n", [riak_kv_bitcask_backend:has_merged(Name, ModState)]),
+                    lager:info("after special merge has speical_merged: ~p~n", [riak_kv_bitcask_backend:has_merged(Name, ModState)]),
                     {reply, ok, State#state{modstate = NewModState}};
                 false ->
                     lager:info("Vnode split backend: ~p is not active so cannot be special merged~n", [{Partition, Name}]),

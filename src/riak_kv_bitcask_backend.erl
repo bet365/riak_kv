@@ -1931,7 +1931,7 @@ pause_merge_test() ->
     Opts = [{data_root, "test/bitcask-backend"}, {max_file_size, 50}, {merge_count, 3}],
     {ok, S} = ?MODULE:start(0, Opts),
     {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
-    BRef = S1#state.ref,
+%%    BRef = S1#state.ref,
 
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
@@ -1959,15 +1959,53 @@ pause_merge_test() ->
     ?MODULE:pause_merge(S2),
     ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
 
+    false = ?MODULE:has_merged(second_split, S2),
+
     {ok, SecondDir1} = file:list_dir("test/bitcask-backend/0/second_split"),
     SecondsFiles1 = [X || X <- SecondDir1, X =/= "bitcask.write.lock"],
     ?assertEqual(4, length(SecondsFiles1)),
 
     ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
+    true = ?MODULE:has_merged(second_split, S2),
 
     {ok, SecondDir2} = file:list_dir("test/bitcask-backend/0/second_split"),
     SecondsFiles2 = [X || X <- SecondDir2, X =/= "bitcask.write.lock"],
     ?assertEqual(8, length(SecondsFiles2)),
+
+    ok = stop(S2),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
+merge_empty_files_test() ->
+    ct:pal("########################### MERGE_EMPTY_INFILES_TEST ##################"),
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {max_file_size, 50}, {merge_count, 3}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b2">>, <<"k2">>, [], <<"v2">>, S1),
+
+    {ok, S2} = ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S2)),
+
+    Path = filename:join(["test/bitcask-backend", "0"]),
+    {ok, DataDirs} = file:list_dir(Path),
+    Dirs = [Dir || Dir <- DataDirs, Dir =/= "version.txt", Dir =/= "second_split"],
+    ?assertNotEqual([], Dirs),
+    ?assertEqual(true, filelib:is_dir("test/bitcask-backend/0/second_split")),
+    ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
+
+    %% Add pause_merge msg to bitcask msg queue and will exit special merge when count hits 3.
+    ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
+
+    true = ?MODULE:has_merged(second_split, S2),
+
+    ?assertEqual({ok, []}, file:list_dir("test/bitcask-backend/0/second_split")),
 
     ok = stop(S2),
     os:cmd("rm -rf test/bitcask-backend/*").
