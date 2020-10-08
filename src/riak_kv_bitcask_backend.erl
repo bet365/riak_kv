@@ -132,7 +132,6 @@ capabilities(_, _) ->
 -spec start(integer(), config()) -> {ok, state()} | {error, term()}.
 start(Partition, Config0) ->
     rand:seed(exrop, os:timestamp()),
-%%    Config0 = proplists:get_value(start_md_backends, Config01, true),
     BaseConfig = proplists:delete(small_keys, Config0),
     KeyOpts =
         [
@@ -141,7 +140,6 @@ start(Partition, Config0) ->
             {encode_riak_key,           ?ENCODE_BITCASK_KEY},
             {decode_riak_key,           ?DECODE_BITCASK_KEY},
             {find_split_fun,            ?FIND_SPLIT_FUN}
-%%            {check_and_upgrade_key_fun, ?CHECK_AND_UPGRADE_KEY_FUN}
         ],
     Config = BaseConfig ++ KeyOpts,
     KeyVsn = ?CURRENT_VERSION,
@@ -161,13 +159,7 @@ start(Partition, Config0) ->
                     UpgradeRet = maybe_start_upgrade(BitcaskDir),
                     BitcaskOpts = set_mode(read_write, Config),
                     BitcaskOpts1 = [{upgrade_key, true} | BitcaskOpts],
-                    Backends =
-                        case proplists:get_value(start_md_backends, Config, true) of
-                            true ->
-                                fetch_metadata_backends(Partition);
-                            false ->
-                                []
-                        end,
+                    Backends = fetch_metadata_backends(Partition),
                     case Backends of
                         [] ->
                             start_split(BitcaskDir, BitcaskOpts, UpgradeRet, DataDir, DataRoot, BitcaskOpts1, Partition, KeyVsn, bitcask);
@@ -255,7 +247,13 @@ get(Bucket, Key, State) ->
 get(Bucket, Key, #state{ref=Ref, key_vsn=KVers, partition = _Partition, bitcask_mod = BitcaskMod, backends = Backends}=State, Opts) ->
     Split = get_split_from_backends(Bucket, Key, Backends, get),
     BitcaskKey = make_bitcask_key(KVers, Bucket, Key),
-    case BitcaskMod:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts]) of
+    Resp = case BitcaskMod of
+               bitcask ->
+                   BitcaskMod:get(Ref, BitcaskKey);
+               bitcask_manager ->
+                   BitcaskMod:get(Ref, BitcaskKey, [{split, binary_to_atom(Split, latin1)} | Opts])
+           end,
+    case Resp of
         {ok, Value} ->
             {ok, Value, State};
         not_found  ->
@@ -365,7 +363,6 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                     {ok, FoldResult}
             end
     end.
-%% TODO List keys nto retrieving previously put data when in "deactive" state
 %% @doc Fold over all the keys for one or all buckets.
 -spec fold_keys(riak_kv_backend:fold_keys_fun(),
                 any(),
@@ -761,33 +758,6 @@ make_bitcask_key(2, {Type, Bucket}, Key) ->
 make_bitcask_key(2, Bucket, Key) ->
     BucketSz = size(Bucket),
     <<?VERSION_2:7, 0:1, BucketSz:16/integer, Bucket/binary, Key/binary>>.
-
-%%make_bitcask_key(3, {Type, Bucket, Split}, Key) ->
-%%    TypeSz = size(Type),
-%%    BucketSz = size(Bucket),
-%%    SplitSz = size(Split),
-%%    <<?VERSION_3:7, 1:1, SplitSz:16/integer, Split/binary, TypeSz:16/integer, Type/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>;
-%%
-%%make_bitcask_key(3, {Bucket, Split}, Key) ->
-%%    SplitSz = size(Split),
-%%    BucketSz = size(Bucket),
-%%    <<?VERSION_3:7, 0:1, SplitSz:16/integer, Split/binary, BucketSz:16/integer, Bucket/binary, Key/binary>>.
-
-
-
-
-%% Make the riak key from the bitcask key, based on the version number
-%%make_riak_key(<<?VERSION_3:7, HasType:1, SplitSz:16/integer, Split:SplitSz/bytes, Sz:16/integer,
-%%    TypeOrBucket:Sz/bytes, Rest/binary>>) ->
-%%    case HasType of
-%%        0 ->
-%%             no type, first field is bucket
-%%            {Split, TypeOrBucket, Rest};
-%%        1 ->
-%%             has a tyoe, extract bucket as well
-%%            <<BucketSz:16/integer, Bucket:BucketSz/bytes, Key/binary>> = Rest,
-%%            {Split, {TypeOrBucket, Bucket}, Key}
-%%    end;
 make_riak_key(<<?VERSION_2:7, HasType:1, Sz:16/integer,
     TypeOrBucket:Sz/bytes, Rest/binary>>) ->
     case HasType of
@@ -856,27 +826,8 @@ encode_disk_key(<<?VERSION_0:8,_Rest/bits>> = BitcaskKey, _Opts) ->
     BitcaskKey.
 
 -spec find_split(riak_object:bucket() | riak_object:key(), integer()) -> atom().
-%%find_split(Key, undefined) -> %% TODO Should never be undefined if called via riak_kv. Partition is defaulted to undefined in bitcask_manager:prep_mstate if one is not passed in the options to the call.
-%%    case make_riak_key(Key) of
-%%        {Split, {_Type, _Bucket}, _Key} ->
-%%            binary_to_atom(Split, latin1);
-%%        {Split, _Bucket, _Key} ->
-%%            binary_to_atom(Split, latin1);
-%%        {{_Type, Bucket}, _Key} ->
-%%            binary_to_atom(Bucket, latin1);
-%%        {Bucket, _Key} ->
-%%            binary_to_atom(Bucket, latin1);
-%%        _ ->
-%%            default
-%%    end;
 find_split(Key0, Partition) when is_integer(Partition) ->
     case make_riak_key(Key0) of
-%%        {_Split, {_Type, Bucket}, Key} ->
-%%            Split1 = get_split(Bucket, Key, Partition, find_split),
-%%            binary_to_atom(Split1, latin1);
-%%        {_Split, Bucket, Key} ->
-%%            Split1 = get_split(Bucket, Key, Partition, find_split),
-%%            binary_to_atom(Split1, latin1);
         {{_Type, Bucket}, Key} ->
             Split1 = get_split_from_md(Bucket, Key, Partition),
             binary_to_atom(Split1, latin1);
@@ -886,30 +837,6 @@ find_split(Key0, Partition) when is_integer(Partition) ->
         _ ->
             default
     end.
-
-%%check_and_upgrade_key(default, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
-%%    KeyDirKey;
-%%-spec check_and_upgrade_key(atom(), binary()) -> binary().
-%%check_and_upgrade_key(Split, <<Version:7, _Rest/bitstring>> = KeyDirKey) when Version =/= ?VERSION_3 ->
-%%    case ?DECODE_BITCASK_KEY(KeyDirKey) of
-%%        {{Bucket, Type}, Key} ->
-%%            ?ENCODE_BITCASK_KEY(3, {Type, Bucket, atom_to_binary(Split, latin1)}, Key);
-%%        {Bucket, Key} ->
-%%            ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split, latin1)}, Key)
-%%    end;
-%%check_and_upgrade_key(Split0, <<?VERSION_3:7, _Rest/bitstring>> = KeyDirKey) ->
-%%    case ?DECODE_BITCASK_KEY(KeyDirKey) of
-%%        {Split0, {_Type, _Bucket}, _Key} ->
-%%            KeyDirKey;
-%%        {_Split1, {Type, Bucket}, Key} ->
-%%            ?ENCODE_BITCASK_KEY(3, {Type, Bucket, atom_to_binary(Split0, latin1)}, Key);
-%%        {Split0, _Bucket, _Key} ->
-%%            KeyDirKey;
-%%        {_Split1, Bucket, Key} ->
-%%            ?ENCODE_BITCASK_KEY(3, {Bucket, atom_to_binary(Split0, latin1)}, Key)
-%%    end;
-%%check_and_upgrade_key(_Split, KeyDirKey) ->
-%%    KeyDirKey.
 
 
 %% ===================================================================
@@ -922,10 +849,6 @@ merge_check(Ref, BitcaskRoot, BitcaskOpts, BitcaskMod) ->
         {0, _} ->
             MaxMergeSize = app_helper:get_env(riak_kv,
                                               bitcask_max_merge_size),
-%%            BState = erlang:get(Ref),
-%%            {default, _DefRef, _, _} = lists:keyfind(default, 1, element(2, BState)),
-%%            DefState = erlang:get(DefRef),
-
 
             case BitcaskMod:needs_merge(Ref, [{max_merge_size, MaxMergeSize}]) of
                 {true, Files} ->
@@ -970,19 +893,12 @@ fold_buckets_fun(FoldBucketsFun) ->
                             {FoldBucketsFun(Bucket, Acc),
                                 sets:add_element(Bucket, BucketSet)}
                     end
-%%                {_S, Bucket, _} ->
-%%                    case sets:is_element(Bucket, BucketSet) of
-%%                        true ->
-%%                            {Acc, BucketSet};
-%%                        false ->
-%%                            {FoldBucketsFun(Bucket, Acc),
-%%                                sets:add_element(Bucket, BucketSet)}
-%%                    end
             end
     end.
 
 %% @private
 %% Return a function to fold over keys on this backend
+%% TODO when will fold_keys ever be called with undefined bucket, and does mean fold all keys then?
 fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         case make_riak_key(BK) of
@@ -995,13 +911,6 @@ fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
 fold_keys_fun(FoldKeysFun, Bucket) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         case make_riak_key(BK) of
-%%            {_S, B, Key} ->
-%%                case B =:= Bucket of
-%%                    true ->
-%%                        FoldKeysFun(B, Key, Acc);
-%%                    false ->
-%%                        Acc
-%%                end;
             {B, Key} ->
                 case B =:= Bucket of
                     true ->
@@ -1017,8 +926,6 @@ fold_keys_fun(FoldKeysFun, Bucket) ->
 fold_objects_fun(FoldObjectsFun, <<"undefined">>) ->
     fun(BK, Value, Acc) ->
             case make_riak_key(BK) of
-%%                {_S, Bucket, Key} ->
-%%                    FoldObjectsFun(Bucket, Key, Value, Acc);
                 {Bucket, Key} ->
                     FoldObjectsFun(Bucket, Key, Value, Acc)
             end
@@ -1033,13 +940,6 @@ fold_objects_fun(FoldObjectsFun, Bucket) ->
                     false ->
                         Acc
                 end
-%%            {_S, B, Key} ->
-%%                case B =:= Bucket of
-%%                    true ->
-%%                        FoldObjectsFun(B, Key, Value, Acc);
-%%                    false ->
-%%                        Acc
-%%                end
         end
     end.
 
@@ -1831,6 +1731,161 @@ split_fold_keys_test() ->
 
     ok = stop(S5),
     os:cmd("rm -rf test/bitcask-backend/*").
+
+%% TODO Add fold_buckets and fold to this test.
+split_complete_fold_test() ->
+    ct:pal("########################### Split_Complete_fold_TEST ##################"),
+    os:cmd("rm -rf test/bitcask-backend/*"),
+    Opts = [{data_root, "test/bitcask-backend"}, {}],
+    {ok, S} = ?MODULE:start(0, Opts),
+    {ok, S1} = ?MODULE:start_additional_split({second_split, false}, S),
+
+    BufferMod = riak_kv_fold_buffer,
+
+    FoldFun = fun(_, Key, Buffer) ->
+        BufferMod:add(Key, Buffer)
+              end,
+%%    FoldFun0 = fun(_, Key, Acc) -> [Key | Acc] end,
+
+    ResultFun =
+        fun(_Items) ->
+            ok
+        end,
+
+    BufferAcc = BufferMod:new(10, ResultFun),
+
+    ?assertEqual(true, check_backend_exists(default, S1)),
+    ?assertEqual(true, check_backend_exists(second_split, S1)),
+    ?assertEqual(true, is_backend_active(default, S1)),
+    ?assertEqual(false, is_backend_active(second_split, S1)),
+
+    ?MODULE:put(<<"b1">>, <<"k1">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"b1">>, <<"k2">>, [], <<"v2">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v1">>, S1),
+    ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v2">>, S1),
+
+%% In the case of splits being keys a fold_keys with bucket won't pick up items from an active split, so
+%% all_splits needs to be passed in to cover these
+    {async, AsyncBuff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, AsyncBuff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}, {all_splits, true}], S1),
+    {async, AsyncBuff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, AsyncBuff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S1),
+
+    {ok, Buff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, Buff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}, {all_splits, true}], S1),
+    {ok, Buff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, Buff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S1),
+
+    ct:pal("AsyncBuff00: ~p~n", [AsyncBuff00()]),
+    ct:pal("AsyncBuff01: ~p~n", [AsyncBuff01()]),
+    ct:pal("AsyncBuff02: ~p~n", [AsyncBuff02()]),
+    ct:pal("AsyncBuff03: ~p~n", [AsyncBuff03()]),
+    ct:pal("Buff00: ~p~n", [Buff00]),
+    ct:pal("Buff01: ~p~n", [Buff01]),
+    ct:pal("Buff02: ~p~n", [Buff02]),
+    ct:pal("Buff03: ~p~n", [Buff03]),
+    AsyncKeys00 = element(2, AsyncBuff00()),
+    AsyncKeys01 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff01()]),
+    AsyncKeys02 = element(2, AsyncBuff02()),
+    AsyncKeys03 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff03()]),
+    Keys00 = element(2, Buff00),
+    Keys01 = lists:flatten([X || {_, X, _, _, _} <- Buff01]),
+    Keys02 = element(2, Buff02),
+    Keys03 = lists:flatten([X || {_, X, _, _, _} <- Buff03]),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(AsyncKeys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(Keys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(AsyncKeys01)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(Keys01)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(AsyncKeys02)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(Keys02)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(AsyncKeys03)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(Keys03)),
+
+
+    {ok, S2} = ?MODULE:activate_backend(second_split, S1),
+    ?assertEqual(true, is_backend_active(second_split, S2)),
+
+    ?MODULE:put(<<"second_split">>, <<"k5">>, [], <<"v1">>, S2#state{partition = 1}),
+    ?MODULE:put(<<"second_split">>, <<"k6">>, [], <<"v2">>, S2#state{partition = 1}),
+
+    {async, AsyncBuff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S2),
+    {async, AsyncBuff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S2),
+
+    {ok, Buff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S2),
+    {ok, Buff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S2),
+
+    AsyncKeys04 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff04()]),
+    AsyncKeys05 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff05()]),
+    Keys04 = lists:flatten([X || {_, X, _, _, _} <- Buff04]),
+    Keys05 = lists:flatten([X || {_, X, _, _, _} <- Buff05]),
+
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys04)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys05)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys04)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys05)),
+
+
+    {ok, S3} = ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
+
+    ?MODULE:put(<<"second_split">>, <<"k7">>, [], <<"v1">>, S3#state{partition = 1}),
+    ?MODULE:put(<<"second_split">>, <<"k8">>, [], <<"v2">>, S3#state{partition = 1}),
+
+    {async, AsyncBuff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S3),
+    {async, AsyncBuff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S3),
+    {ok, Buff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S3),
+    {ok, Buff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S3),
+
+    AsyncKeys06 = element(2, AsyncBuff06()),
+    AsyncKeys07 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff07()]),
+    Keys06 = element(2, Buff06),
+    Keys07 = lists:flatten([X || {_, X, _, _, _} <- Buff07()]),
+
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(Keys06)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(Keys07)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(AsyncKeys06)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(AsyncKeys07)),
+
+    {ok, S4} = ?MODULE:deactivate_backend(second_split, S3),
+
+    ?MODULE:put(<<"second_split">>, <<"k9">>, [], <<"v1">>, S4),
+    ?MODULE:put(<<"second_split">>, <<"k91">>, [], <<"v2">>, S4),
+
+    {async, AsyncBuff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S4),
+    {async, AsyncBuff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S4),
+    {ok, Buff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S4),
+    {ok, Buff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S4),
+
+    AsyncKeys08 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff08()]),
+    AsyncKeys09 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff09()]),
+    Keys08 = lists:flatten([X || {_, X, _, _, _} <- Buff08]),
+    Keys09 = lists:flatten([X || {_, X, _, _, _} <- Buff09]),
+
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys09)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys09)),
+
+    {ok, S5} = ?MODULE:reverse_merge(second_split, default, S4),
+
+    {async, AsyncBuff5} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S5),
+    {async, AsyncBuff55} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S5),
+    {ok, Buff5} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S5),
+    {ok, Buff55} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S5),
+
+    AsyncKeys5 = element(2, AsyncBuff5()),
+    AsyncKeys55 = element(2, AsyncBuff55()),
+    Keys5 = element(2, Buff5),
+    Keys55 = element(2, Buff55),
+
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys5)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys55)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys5)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys55)),
+
+    ok = stop(S5),
+    os:cmd("rm -rf test/bitcask-backend/*").
+
 
 full_split_test() ->
     ct:pal("########################### FULL_SPLIT_TEST ##################"),

@@ -1013,14 +1013,19 @@ handle_command({remove_split_backend, _Partition, Name}, _, #state{modstate = Mo
                     lager:error("Vnode attempted to remove backend: ~p but it currently has the Active State as: ~p in bitcask~n", [Name, true]),
                     {reply, error, State};
                 _CurrentState ->
-                    {ok, NewModState} = riak_kv_bitcask_backend:remove_backend(Name, ModState),
-                    NewState = State#state{modstate = NewModState},
-                    case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+                    case riak_kv_bitcask_backend:has_merged(Name, ModState) of
                         true ->
-                            lager:error("Failed to remove backend: ~p from ModState: ~p during removal process", [Name, NewModState]),
-                            {reply, error, State};
+                            {ok, NewModState} = riak_kv_bitcask_backend:remove_backend(Name, ModState),
+                            NewState = State#state{modstate = NewModState},
+                            case riak_kv_bitcask_backend:check_backend_exists(Name, ModState) of
+                                true ->
+                                    lager:error("Failed to remove backend: ~p from ModState: ~p during removal process", [Name, NewModState]),
+                                    {reply, error, State};
+                                false ->
+                                    {reply, ok, NewState}
+                            end;
                         false ->
-                            {reply, ok, NewState}
+                            lager:error("Attempted to remove backend: ~p which is active but has not been special merged", [Name])
                     end
             end
     end;
