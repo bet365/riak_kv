@@ -328,23 +328,35 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                data_dir=DataFile,
                                                ref=Ref,
                                                root=DataRoot,
-                                               bitcask_mod = BitcaskMod}) ->
+                                               bitcask_mod = BitcaskMod,
+                                               partition = Partition,
+                                               backends = Backends}) ->
+    Split =  proplists:get_value(split, Opts, <<"undefined">>),
     FoldFun = fold_buckets_fun(FoldBucketsFun),
     FoldOpts = build_bitcask_fold_opts(Opts),
     case lists:member(async_fold, Opts) of
         true ->
             ReadOpts = set_mode(read_only, BitcaskOpts),
-
+            {HasMerged, IsActive} = get_active_merge_status(BitcaskMod, Ref, binary_to_atom(Split, latin1)),
+            NewOpts = case {IsActive, HasMerged} of
+                          {false, false} ->
+                              FoldOpts;
+                          _ ->
+                              [{split, binary_to_atom(Split, latin1)} | FoldOpts]
+                      end,
             BucketFolder =
                 fun() ->
-                        case BitcaskMod:open(filename:join(DataRoot, DataFile), ReadOpts) of
+                    Ref1 = open_read_only_backends(Split, filename:join(DataRoot, DataFile), HasMerged, IsActive, NewOpts, ReadOpts, Partition, BitcaskMod, Backends),
+                        case Ref1 of
                             Ref1 when is_reference(Ref1) ->
                                 try
-                                    {Acc1, _} =
-                                        BitcaskMod:fold_keys(Ref1,
-                                                          FoldFun,
-                                                          {Acc, sets:new()}, FoldOpts),
-                                        Acc1
+                                    case BitcaskMod:fold_keys(Ref1, FoldFun, {Acc, sets:new()}, NewOpts) of
+                                        OutPut when is_list(OutPut) ->
+                                            [Result || {Result, _BucketSet} <- OutPut];
+                                        OutPut ->
+                                            {Result, _Bucketset} = OutPut,
+                                            Result
+                                    end
                                 after
                                     BitcaskMod:close(Ref1)
                                 end;
@@ -354,8 +366,14 @@ fold_buckets(FoldBucketsFun, Acc, Opts, #state{opts=BitcaskOpts,
                 end,
             {async, BucketFolder};
         false ->
-            {FoldResult, _Bucketset} =
-                BitcaskMod:fold_keys(Ref, FoldFun, {Acc, sets:new()}, FoldOpts),
+            NewOpts = add_split_opts(Split, FoldOpts, Partition),
+            FoldResult = case BitcaskMod:fold_keys(Ref, FoldFun, {Acc, sets:new()}, NewOpts) of
+                             OutPut when is_list(OutPut) ->
+                                 [X || {X, _BucketSet} <- OutPut];
+                             OutPut ->
+                                 {Result, _Bucketset} = OutPut,
+                                 Result
+                         end,
             case FoldResult of
                 {error, _} ->
                     FoldResult;
@@ -373,7 +391,8 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                                          ref=Ref,
                                          root=DataRoot,
                                          partition = Partition,
-                                         bitcask_mod = BitcaskMod}) ->
+                                         bitcask_mod = BitcaskMod,
+                                         backends = Backends}) ->
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldOpts = build_bitcask_fold_opts(Opts),
     FoldFun = fold_keys_fun(FoldKeysFun, Bucket),
@@ -389,7 +408,7 @@ fold_keys(FoldKeysFun, Acc, Opts, #state{opts=BitcaskOpts,
                       end,
             KeyFolder =
                 fun() ->
-                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition, BitcaskMod),
+                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, NewOpts, ReadOpts, Partition, BitcaskMod, Backends),
                         case Ref1 of
                             Ref1 when is_reference(Ref1) ->
                                 try
@@ -426,7 +445,7 @@ get_active_merge_status(BitcaskMod, Ref, Bucket) ->
 build_bitcask_fold_opts(Opts) ->
     case lists:member(ignore_deletes_with_expiry, Opts) of
         true ->
-            [{ignore_tstamp_expire_keys, true}];
+            [{ignore_tstamp_expire_keys, true} | Opts];
         false ->
             lists:delete(ignore_deletes_with_expiry, Opts)
     end.
@@ -442,7 +461,8 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                                                ref=Ref,
                                                root=DataRoot,
                                                partition = Partition,
-                                               bitcask_mod = BitcaskMod}) ->
+                                               bitcask_mod = BitcaskMod,
+                                               backends = Backends}) ->
     Bucket =  proplists:get_value(bucket, Opts, <<"undefined">>),
     FoldFun = fold_objects_fun(FoldObjectsFun, Bucket),
     FoldOpts = build_bitcask_fold_opts(Opts),
@@ -458,7 +478,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
                       end,
             ObjectFolder =
                 fun() ->
-                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, ReadOpts, Partition, BitcaskMod),
+                    Ref1 = open_read_only_backends(Bucket, filename:join(DataRoot, DataFile), HasMerged, IsActive, NewOpts, ReadOpts, Partition, BitcaskMod, Backends),
                     case Ref1 of
                         Ref1 when is_reference(Ref1) ->
                             try
@@ -482,34 +502,50 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{opts=BitcaskOpts,
             end
     end.
 
--spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), integer(), atom()) -> reference().
-open_read_only_backends(Bucket, Dir, HasMerged, IsActive, Opts, Partition, BitcaskMod) ->
-    case IsActive of
-        false ->
-            case HasMerged of
-                false ->
-                    BitcaskMod:open(Dir, Opts);
-                true ->
-                    SplitOpts = add_split_opts(Bucket, Opts, Partition),
-                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    Ref1 = BitcaskMod:open(Dir, Opts),
-                    BitcaskMod:open(Ref1, Dir, OpenOpts)
-            end;
+-spec open_read_only_backends(riak_object:bucket(), string(), atom(), atom(), config(), config(), integer(), atom(), list()) -> reference().
+open_read_only_backends(Bucket, Dir, HasMerged, IsActive, FoldOpts, Opts, Partition, BitcaskMod, Backends) ->
+    AllSplits = proplists:get_value(all_splits, FoldOpts, false),
+    case AllSplits of
+        %% We do not care about states here, we just want to open all backends as bitcask will bypass states and read from each anyway.
         true ->
-            case HasMerged of
-                true ->
-                    SplitOpts = add_split_opts(Bucket, Opts, Partition),
-                    OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
-                    BitcaskMod:open(Dir, OpenOpts);
+            Ref = BitcaskMod:open(Dir, Opts),
+            NewOpts = lists:keydelete(split, 1, Opts),
+            lists:foldl(
+                fun({Backend, _State}, Ref0) ->
+                    NewOpts1 = [{split, binary_to_atom(Backend, latin1)} | NewOpts],
+                    BitcaskMod:open(Ref0, Dir, NewOpts1)
+                end, Ref, Backends);
+        false ->
+            case IsActive of
                 false ->
+                    case HasMerged of
+                        false ->
+                            BitcaskMod:open(Dir, Opts);
+                        true ->
+                            SplitOpts = add_split_opts(Bucket, Opts, Partition),
+                            OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                            Ref1 = BitcaskMod:open(Dir, Opts),
+                            BitcaskMod:open(Ref1, Dir, OpenOpts)
+                    end;
+                true ->
+                    case HasMerged of
+                        true ->
+                            SplitOpts = add_split_opts(Bucket, Opts, Partition),
+                            OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                            BitcaskMod:open(Dir, OpenOpts);
+                        false ->
+                            SplitOpts = add_split_opts(Bucket, Opts, Partition),
+                            OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
+                            Ref1 = BitcaskMod:open(Dir, Opts),
+                            BitcaskMod:open(Ref1, Dir, OpenOpts)
+                    end;
+                eliminate -> %% We want to still open both backends as this will add the second one into manager state so it can be fetched for folds
                     SplitOpts = add_split_opts(Bucket, Opts, Partition),
                     OpenOpts = [{has_merged, HasMerged}, {is_active, IsActive} | SplitOpts],
                     Ref1 = BitcaskMod:open(Dir, Opts),
                     BitcaskMod:open(Ref1, Dir, OpenOpts)
-            end;
-        eliminate ->
-            BitcaskMod:open(Dir, Opts)
-    end.
+            end
+        end.
 
 %% @doc Delete all objects from this bitcask backend
 %% @TODO once bitcask has a more friendly drop function
@@ -902,8 +938,6 @@ fold_buckets_fun(FoldBucketsFun) ->
 fold_keys_fun(FoldKeysFun, <<"undefined">>) ->
     fun(#bitcask_entry{key=BK}, Acc) ->
         case make_riak_key(BK) of
-%%            {_S, Bucket, Key} ->
-%%                FoldKeysFun(Bucket, Key, Acc);
             {Bucket, Key} ->
                 FoldKeysFun(Bucket, Key, Acc)
         end
@@ -1528,7 +1562,6 @@ split_data_test() ->
 
     {ok, S2} = ?MODULE:activate_backend(second_split, S1),
     ?assertEqual(true, is_backend_active(second_split, S2)),
-    ct:pal("Backend has been activated check state: ~p~n", [S2]),
 
     ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v4">>, S2#state{partition = 1}),
     {ok, <<"v4">>, _} = ?MODULE:get(<<"second_split">>, <<"k4">>, S2#state{partition = 1}),
@@ -1643,7 +1676,7 @@ split_fold_keys_test() ->
             ok
         end,
 
-    BufferAcc = BufferMod:new(10, ResultFun),
+    BufferAcc = BufferMod:new(100, ResultFun),
 
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
@@ -1680,11 +1713,8 @@ split_fold_keys_test() ->
     {async, AsyncBuff2} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S2),
     {ok, Buff2} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S2),
 
-    AsyncKeys2 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff2()]),
-    Keys2  = lists:flatten([X || {_, X, _, _, _} <- Buff2]),
-%%    Keys2  = element(2, Buff2),
-    ct:pal("AsyncBuff2: ~p~n", [AsyncBuff2()]),
-    ct:pal("Buff2: ~p~n", [Buff2]),
+    AsyncKeys2 = element(2, AsyncBuff2()),
+    Keys2  = element(2, Buff2),
 
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys2)),
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys2)),
@@ -1712,8 +1742,8 @@ split_fold_keys_test() ->
     {async, AsyncBuff4} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S4),
     {ok, Buff4} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S4),
 
-    AsyncKeys4 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff4()]),
-    Keys4  = lists:flatten([X || {_, X, _, _, _} <- Buff4]),
+    AsyncKeys4 = element(2, AsyncBuff4()),
+    Keys4  = element(2, Buff4),
 
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys4)),
     ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys4)),
@@ -1732,7 +1762,6 @@ split_fold_keys_test() ->
     ok = stop(S5),
     os:cmd("rm -rf test/bitcask-backend/*").
 
-%% TODO Add fold_buckets and fold to this test.
 split_complete_fold_test() ->
     ct:pal("########################### Split_Complete_fold_TEST ##################"),
     os:cmd("rm -rf test/bitcask-backend/*"),
@@ -1742,17 +1771,22 @@ split_complete_fold_test() ->
 
     BufferMod = riak_kv_fold_buffer,
 
-    FoldFun = fun(_, Key, Buffer) ->
+    BFoldFun = fun(Bucket, Buffer) ->
+        BufferMod:add(Bucket, Buffer)
+               end,
+    FoldFun = fun(_Bucket, Key, Buffer) ->
         BufferMod:add(Key, Buffer)
               end,
-%%    FoldFun0 = fun(_, Key, Acc) -> [Key | Acc] end,
+    OFoldFun = fun(_Bucket, Key, _Value, Buffer) ->
+        BufferMod:add(Key, Buffer)
+               end,
 
     ResultFun =
         fun(_Items) ->
             ok
         end,
 
-    BufferAcc = BufferMod:new(10, ResultFun),
+    BufferAcc = BufferMod:new(100, ResultFun),
 
     ?assertEqual(true, check_backend_exists(default, S1)),
     ?assertEqual(true, check_backend_exists(second_split, S1)),
@@ -1764,43 +1798,97 @@ split_complete_fold_test() ->
     ?MODULE:put(<<"second_split">>, <<"k3">>, [], <<"v1">>, S1),
     ?MODULE:put(<<"second_split">>, <<"k4">>, [], <<"v2">>, S1),
 
-%% In the case of splits being keys a fold_keys with bucket won't pick up items from an active split, so
-%% all_splits needs to be passed in to cover these
-    {async, AsyncBuff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
-    {async, AsyncBuff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}, {all_splits, true}], S1),
-    {async, AsyncBuff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
-    {async, AsyncBuff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S1),
+    %% In the case of splits being keys a fold_keys with bucket won't pick up items from an active split, so
+    %% all_splits needs to be passed in to cover these
+    {async, BKAsyncBuff00} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold], S1),
+    {async, BKAsyncBuff01} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"b1">>}], S1),
+    {async, BKAsyncBuff02} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"second_split">>}], S1),
+    {async, BKAsyncBuff03} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    {ok, Buff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
-    {ok, Buff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}, {all_splits, true}], S1),
-    {ok, Buff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
-    {ok, Buff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S1),
+    {async, KAsyncBuff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold], S1),
+    {async, KAsyncBuff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, KAsyncBuff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, KAsyncBuff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ct:pal("AsyncBuff00: ~p~n", [AsyncBuff00()]),
-    ct:pal("AsyncBuff01: ~p~n", [AsyncBuff01()]),
-    ct:pal("AsyncBuff02: ~p~n", [AsyncBuff02()]),
-    ct:pal("AsyncBuff03: ~p~n", [AsyncBuff03()]),
-    ct:pal("Buff00: ~p~n", [Buff00]),
-    ct:pal("Buff01: ~p~n", [Buff01]),
-    ct:pal("Buff02: ~p~n", [Buff02]),
-    ct:pal("Buff03: ~p~n", [Buff03]),
-    AsyncKeys00 = element(2, AsyncBuff00()),
-    AsyncKeys01 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff01()]),
-    AsyncKeys02 = element(2, AsyncBuff02()),
-    AsyncKeys03 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff03()]),
-    Keys00 = element(2, Buff00),
-    Keys01 = lists:flatten([X || {_, X, _, _, _} <- Buff01]),
-    Keys02 = element(2, Buff02),
-    Keys03 = lists:flatten([X || {_, X, _, _, _} <- Buff03]),
+    {async, FAsyncBuff00} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold], S1),
+    {async, FAsyncBuff01} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, FAsyncBuff02} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, FAsyncBuff03} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(AsyncKeys00)),
-    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(Keys00)),
-    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(AsyncKeys01)),
-    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(Keys01)),
-    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(AsyncKeys02)),
-    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(Keys02)),
-    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(AsyncKeys03)),
-    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(Keys03)),
+    {ok, BKBuff00} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [], S1),
+    {ok, BKBuff01} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"b1">>}], S1),
+    {ok, BKBuff02} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"second_split">>}], S1),
+    {ok, BKBuff03} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, KBuff00} = ?MODULE:fold_keys(FoldFun, BufferAcc, [], S1),
+    {ok, KBuff01} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, KBuff02} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, KBuff03} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, FBuff00} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [], S1),
+    {ok, FBuff01} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, FBuff02} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, FBuff03} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    BKAsyncKeys00 = element(2, BKAsyncBuff00()),
+    BKAsyncKeys01 = element(2, BKAsyncBuff01()),
+    BKAsyncKeys02 = element(2, BKAsyncBuff02()),
+    BKAsyncKeys03 = element(2, BKAsyncBuff03()),
+
+    KAsyncKeys00 = element(2, KAsyncBuff00()),
+    KAsyncKeys01 = element(2, KAsyncBuff01()),
+    KAsyncKeys02 = element(2, KAsyncBuff02()),
+    KAsyncKeys03 = element(2, KAsyncBuff03()),
+
+    FAsyncKeys00 = element(2, FAsyncBuff00()),
+    FAsyncKeys01 = element(2, FAsyncBuff01()),
+    FAsyncKeys02 = element(2, FAsyncBuff02()),
+    FAsyncKeys03 = element(2, FAsyncBuff03()),
+
+    BKKeys00 = element(2, BKBuff00),
+    BKKeys01 = element(2, BKBuff01),
+    BKKeys02 = element(2, BKBuff02),
+    BKKeys03 = element(2, BKBuff03),
+
+    KKeys00 = element(2, KBuff00),
+    KKeys01 = element(2, KBuff01),
+    KKeys02 = element(2, KBuff02),
+    KKeys03 = element(2, KBuff03),
+
+    FKeys00 = element(2, FBuff00),
+    FKeys01 = element(2, FBuff01),
+    FKeys02 = element(2, FBuff02),
+    FKeys03 = element(2, FBuff03),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys00)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys01)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys02)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys03)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(KAsyncKeys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys01)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(KAsyncKeys02)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(KAsyncKeys03)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FAsyncKeys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys01)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(FAsyncKeys02)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FAsyncKeys03)),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys00)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys01)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys02)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys03)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>,<<"k3">>, <<"k4">>], lists:sort(KKeys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys01)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(KKeys02)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(KKeys03)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FKeys00)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys01)),
+    ?assertEqual([<<"k3">>, <<"k4">>], lists:sort(FKeys02)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FKeys03)),
 
 
     {ok, S2} = ?MODULE:activate_backend(second_split, S1),
@@ -1809,21 +1897,96 @@ split_complete_fold_test() ->
     ?MODULE:put(<<"second_split">>, <<"k5">>, [], <<"v1">>, S2#state{partition = 1}),
     ?MODULE:put(<<"second_split">>, <<"k6">>, [], <<"v2">>, S2#state{partition = 1}),
 
-    {async, AsyncBuff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S2),
-    {async, AsyncBuff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S2),
 
-    {ok, Buff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S2),
-    {ok, Buff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S2),
+    {async, BKAsyncBuff04} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold], S1),
+    {async, BKAsyncBuff05} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"b1">>}], S1),
+    {async, BKAsyncBuff06} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"second_split">>}], S1),
+    {async, BKAsyncBuff07} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    AsyncKeys04 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff04()]),
-    AsyncKeys05 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff05()]),
-    Keys04 = lists:flatten([X || {_, X, _, _, _} <- Buff04]),
-    Keys05 = lists:flatten([X || {_, X, _, _, _} <- Buff05]),
+    {async, KAsyncBuff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold], S1),
+    {async, KAsyncBuff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, KAsyncBuff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, KAsyncBuff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys04)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(AsyncKeys05)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys04)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(Keys05)),
+    {async, FAsyncBuff04} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold], S1),
+    {async, FAsyncBuff05} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, FAsyncBuff06} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, FAsyncBuff07} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {ok, BKBuff04} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [], S1),
+    {ok, BKBuff05} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"b1">>}], S1),
+    {ok, BKBuff06} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"second_split">>}], S1),
+    {ok, BKBuff07} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, KBuff04} = ?MODULE:fold_keys(FoldFun, BufferAcc, [], S1),
+    {ok, KBuff05} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, KBuff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, KBuff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, FBuff04} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [], S1),
+    {ok, FBuff05} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, FBuff06} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, FBuff07} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    BKAsyncKeys04 = element(2, BKAsyncBuff04()),
+    BKAsyncKeys05 = element(2, BKAsyncBuff05()),
+    BKAsyncKeys06 = element(2, BKAsyncBuff06()),
+    BKAsyncKeys07 = element(2, BKAsyncBuff07()),
+
+    KAsyncKeys04 = element(2, KAsyncBuff04()),
+    KAsyncKeys05 = element(2, KAsyncBuff05()),
+    KAsyncKeys06 = element(2, KAsyncBuff06()),
+    KAsyncKeys07 = element(2, KAsyncBuff07()),
+
+    FAsyncKeys04 = element(2, FAsyncBuff04()),
+    FAsyncKeys05 = element(2, FAsyncBuff05()),
+    FAsyncKeys06 = element(2, FAsyncBuff06()),
+    FAsyncKeys07 = element(2, FAsyncBuff07()),
+
+    BKKeys04 = element(2, BKBuff04),
+    BKKeys05 = element(2, BKBuff05),
+    BKKeys06 = element(2, BKBuff06),
+    BKKeys07 = element(2, BKBuff07),
+
+    KKeys04 = element(2, KBuff04),
+    KKeys05 = element(2, KBuff05),
+    KKeys06 = element(2, KBuff06),
+    KKeys07 = element(2, KBuff07),
+
+    FKeys04 = element(2, FBuff04),
+    FKeys05 = element(2, FBuff05),
+    FKeys06 = element(2, FBuff06),
+    FKeys07 = element(2, FBuff07),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys04)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys05)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys06)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys07)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(KAsyncKeys04)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys05)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(KAsyncKeys06)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(KAsyncKeys07)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FAsyncKeys04)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys05)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(FAsyncKeys06)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(FAsyncKeys07)),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys04)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys05)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys06)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys07)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>,<<"k3">>, <<"k4">>], lists:sort(KKeys04)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys05)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(KKeys06)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(KKeys07)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>], lists:sort(FKeys04)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys05)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(FKeys06)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>], lists:sort(FKeys07)),
 
 
     {ok, S3} = ?MODULE:special_merge(default, second_split, S2#state{partition = 1}),
@@ -1831,57 +1994,287 @@ split_complete_fold_test() ->
     ?MODULE:put(<<"second_split">>, <<"k7">>, [], <<"v1">>, S3#state{partition = 1}),
     ?MODULE:put(<<"second_split">>, <<"k8">>, [], <<"v2">>, S3#state{partition = 1}),
 
-    {async, AsyncBuff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S3),
-    {async, AsyncBuff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}, {all_splits, true}], S3),
-    {ok, Buff06} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S3),
-    {ok, Buff07} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}, {all_splits, true}], S3),
 
-    AsyncKeys06 = element(2, AsyncBuff06()),
-    AsyncKeys07 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff07()]),
-    Keys06 = element(2, Buff06),
-    Keys07 = lists:flatten([X || {_, X, _, _, _} <- Buff07()]),
+    {async, BKAsyncBuff08} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold], S1),
+    {async, BKAsyncBuff09} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"b1">>}], S1),
+    {async, BKAsyncBuff10} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"second_split">>}], S1),
+    {async, BKAsyncBuff11} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(Keys06)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(Keys07)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(AsyncKeys06)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(AsyncKeys07)),
+    {async, KAsyncBuff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold], S1),
+    {async, KAsyncBuff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, KAsyncBuff10} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, KAsyncBuff11} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {async, FAsyncBuff08} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold], S1),
+    {async, FAsyncBuff09} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, FAsyncBuff10} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, FAsyncBuff11} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {ok, BKBuff08} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [], S1),
+    {ok, BKBuff09} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"b1">>}], S1),
+    {ok, BKBuff10} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"second_split">>}], S1),
+    {ok, BKBuff11} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, KBuff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [], S1),
+    {ok, KBuff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, KBuff10} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, KBuff11} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, FBuff08} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [], S1),
+    {ok, FBuff09} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, FBuff10} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, FBuff11} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    BKAsyncKeys08 = element(2, BKAsyncBuff08()),
+    BKAsyncKeys09 = element(2, BKAsyncBuff09()),
+    BKAsyncKeys10 = element(2, BKAsyncBuff10()),
+    BKAsyncKeys11 = element(2, BKAsyncBuff11()),
+
+    KAsyncKeys08 = element(2, KAsyncBuff08()),
+    KAsyncKeys09 = element(2, KAsyncBuff09()),
+    KAsyncKeys10 = element(2, KAsyncBuff10()),
+    KAsyncKeys11 = element(2, KAsyncBuff11()),
+
+    FAsyncKeys08 = element(2, FAsyncBuff08()),
+    FAsyncKeys09 = element(2, FAsyncBuff09()),
+    FAsyncKeys10 = element(2, FAsyncBuff10()),
+    FAsyncKeys11 = element(2, FAsyncBuff11()),
+
+    BKKeys08 = element(2, BKBuff08),
+    BKKeys09 = element(2, BKBuff09),
+    BKKeys10 = element(2, BKBuff10),
+    BKKeys11 = element(2, BKBuff11),
+
+    KKeys08 = element(2, KBuff08),
+    KKeys09 = element(2, KBuff09),
+    KKeys10 = element(2, KBuff10),
+    KKeys11 = element(2, KBuff11),
+
+    FKeys08 = element(2, FBuff08),
+    FKeys09 = element(2, FBuff09),
+    FKeys10 = element(2, FBuff10),
+    FKeys11 = element(2, FBuff11),
+
+    ?assertEqual([<<"b1">>], lists:sort(BKAsyncKeys08)),
+    ?assertEqual([<<"b1">>], lists:sort(BKAsyncKeys09)),
+    ?assertEqual([<<"second_split">>], lists:sort(BKAsyncKeys10)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys11)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys09)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(KAsyncKeys10)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(KAsyncKeys11)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys09)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(FAsyncKeys10)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(FAsyncKeys11)),
+
+    ?assertEqual([<<"b1">>], lists:sort(BKKeys08)),
+    ?assertEqual([<<"b1">>], lists:sort(BKKeys09)),
+    ?assertEqual([<<"second_split">>], lists:sort(BKKeys10)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys11)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys09)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(KKeys10)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(KKeys11)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys08)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys09)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(FKeys10)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>], lists:sort(FKeys11)),
+
 
     {ok, S4} = ?MODULE:deactivate_backend(second_split, S3),
 
     ?MODULE:put(<<"second_split">>, <<"k9">>, [], <<"v1">>, S4),
     ?MODULE:put(<<"second_split">>, <<"k91">>, [], <<"v2">>, S4),
 
-    {async, AsyncBuff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S4),
-    {async, AsyncBuff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S4),
-    {ok, Buff08} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S4),
-    {ok, Buff09} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S4),
 
-    AsyncKeys08 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff08()]),
-    AsyncKeys09 = lists:flatten([X || {_, X, _, _, _} <- AsyncBuff09()]),
-    Keys08 = lists:flatten([X || {_, X, _, _, _} <- Buff08]),
-    Keys09 = lists:flatten([X || {_, X, _, _, _} <- Buff09]),
+    {async, BKAsyncBuff12} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold], S1),
+    {async, BKAsyncBuff13} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"b1">>}], S1),
+    {async, BKAsyncBuff14} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"second_split">>}], S1),
+    {async, BKAsyncBuff15} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys08)),
-    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys09)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys08)),
-    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys09)),
+    {async, KAsyncBuff12} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold], S1),
+    {async, KAsyncBuff13} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, KAsyncBuff14} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, KAsyncBuff15} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {async, FAsyncBuff12} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold], S1),
+    {async, FAsyncBuff13} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, FAsyncBuff14} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, FAsyncBuff15} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {ok, BKBuff12} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [], S1),
+    {ok, BKBuff13} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"b1">>}], S1),
+    {ok, BKBuff14} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"second_split">>}], S1),
+    {ok, BKBuff15} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, KBuff12} = ?MODULE:fold_keys(FoldFun, BufferAcc, [], S1),
+    {ok, KBuff13} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, KBuff14} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, KBuff15} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, FBuff12} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [], S1),
+    {ok, FBuff13} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, FBuff14} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, FBuff15} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    BKAsyncKeys12 = element(2, BKAsyncBuff12()),
+    BKAsyncKeys13 = element(2, BKAsyncBuff13()),
+    BKAsyncKeys14 = element(2, BKAsyncBuff14()),
+    BKAsyncKeys15 = element(2, BKAsyncBuff15()),
+
+    KAsyncKeys12 = element(2, KAsyncBuff12()),
+    KAsyncKeys13 = element(2, KAsyncBuff13()),
+    KAsyncKeys14 = element(2, KAsyncBuff14()),
+    KAsyncKeys15 = element(2, KAsyncBuff15()),
+
+    FAsyncKeys12 = element(2, FAsyncBuff12()),
+    FAsyncKeys13 = element(2, FAsyncBuff13()),
+    FAsyncKeys14 = element(2, FAsyncBuff14()),
+    FAsyncKeys15 = element(2, FAsyncBuff15()),
+
+    BKKeys12 = element(2, BKBuff12),
+    BKKeys13 = element(2, BKBuff13),
+    BKKeys14 = element(2, BKBuff14),
+    BKKeys15 = element(2, BKBuff15),
+
+    KKeys12 = element(2, KBuff12),
+    KKeys13 = element(2, KBuff13),
+    KKeys14 = element(2, KBuff14),
+    KKeys15 = element(2, KBuff15),
+
+    FKeys12 = element(2, FBuff12),
+    FKeys13 = element(2, FBuff13),
+    FKeys14 = element(2, FBuff14),
+    FKeys15 = element(2, FBuff15),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys12)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys13)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys14)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys15)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys12)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys13)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys14)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys15)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys12)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys13)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys14)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys15)),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys12)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys13)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys14)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys15)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k9">>, <<"k91">>], lists:sort(KKeys12)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys13)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KKeys14)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KKeys15)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k9">>, <<"k91">>], lists:sort(FKeys12)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys13)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FKeys14)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FKeys15)),
+
 
     {ok, S5} = ?MODULE:reverse_merge(second_split, default, S4),
 
-    {async, AsyncBuff5} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S5),
-    {async, AsyncBuff55} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S5),
-    {ok, Buff5} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S5),
-    {ok, Buff55} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S5),
 
-    AsyncKeys5 = element(2, AsyncBuff5()),
-    AsyncKeys55 = element(2, AsyncBuff55()),
-    Keys5 = element(2, Buff5),
-    Keys55 = element(2, Buff55),
+    {async, BKAsyncBuff16} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold], S1),
+    {async, BKAsyncBuff17} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"b1">>}], S1),
+    {async, BKAsyncBuff18} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {split, <<"second_split">>}], S1),
+    {async, BKAsyncBuff19} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
 
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys5)),
-    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(Keys55)),
-    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys5)),
-    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(AsyncKeys55)),
+    {async, KAsyncBuff16} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold], S1),
+    {async, KAsyncBuff17} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, KAsyncBuff18} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, KAsyncBuff19} = ?MODULE:fold_keys(FoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {async, FAsyncBuff16} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold], S1),
+    {async, FAsyncBuff17} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"b1">>}], S1),
+    {async, FAsyncBuff18} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {bucket, <<"second_split">>}], S1),
+    {async, FAsyncBuff19} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [async_fold, {all_splits, true}], S1),
+
+    {ok, BKBuff16} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [], S1),
+    {ok, BKBuff17} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"b1">>}], S1),
+    {ok, BKBuff18} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{split, <<"second_split">>}], S1),
+    {ok, BKBuff19} = ?MODULE:fold_buckets(BFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, KBuff16} = ?MODULE:fold_keys(FoldFun, BufferAcc, [], S1),
+    {ok, KBuff17} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, KBuff18} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, KBuff19} = ?MODULE:fold_keys(FoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    {ok, FBuff16} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [], S1),
+    {ok, FBuff17} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"b1">>}], S1),
+    {ok, FBuff18} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{bucket, <<"second_split">>}], S1),
+    {ok, FBuff19} = ?MODULE:fold_objects(OFoldFun, BufferAcc, [{all_splits, true}], S1),
+
+    BKAsyncKeys16 = element(2, BKAsyncBuff16()),
+    BKAsyncKeys17 = element(2, BKAsyncBuff17()),
+    BKAsyncKeys18 = element(2, BKAsyncBuff18()),
+    BKAsyncKeys19 = element(2, BKAsyncBuff19()),
+
+    KAsyncKeys16 = element(2, KAsyncBuff16()),
+    KAsyncKeys17 = element(2, KAsyncBuff17()),
+    KAsyncKeys18 = element(2, KAsyncBuff18()),
+    KAsyncKeys19 = element(2, KAsyncBuff19()),
+
+    FAsyncKeys16 = element(2, FAsyncBuff16()),
+    FAsyncKeys17 = element(2, FAsyncBuff17()),
+    FAsyncKeys18 = element(2, FAsyncBuff18()),
+    FAsyncKeys19 = element(2, FAsyncBuff19()),
+
+    BKKeys16 = element(2, BKBuff16),
+    BKKeys17 = element(2, BKBuff17),
+    BKKeys18 = element(2, BKBuff18),
+    BKKeys19 = element(2, BKBuff19),
+
+    KKeys16 = element(2, KBuff16),
+    KKeys17 = element(2, KBuff17),
+    KKeys18 = element(2, KBuff18),
+    KKeys19 = element(2, KBuff19),
+
+    FKeys16 = element(2, FBuff16),
+    FKeys17 = element(2, FBuff17),
+    FKeys18 = element(2, FBuff18),
+    FKeys19 = element(2, FBuff19),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys16)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys17)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys18)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKAsyncKeys19)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys16)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KAsyncKeys17)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys18)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KAsyncKeys19)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys16)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FAsyncKeys17)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys18)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FAsyncKeys19)),
+
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys16)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys17)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys18)),
+    ?assertEqual([<<"b1">>, <<"second_split">>], lists:sort(BKKeys19)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KKeys16)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(KKeys17)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KKeys18)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(KKeys19)),
+
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FKeys16)),
+    ?assertEqual([<<"k1">>, <<"k2">>], lists:sort(FKeys17)),
+    ?assertEqual([<<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FKeys18)),
+    ?assertEqual([<<"k1">>, <<"k2">>, <<"k3">>, <<"k4">>, <<"k5">>, <<"k6">>, <<"k7">>, <<"k8">>, <<"k9">>, <<"k91">>], lists:sort(FKeys19)),
 
     ok = stop(S5),
     os:cmd("rm -rf test/bitcask-backend/*").
