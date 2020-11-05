@@ -127,10 +127,32 @@ start(Partition, Config) ->
     PCL = app_helper:get_prop_or_env(ledger_pagecachelevel, Config, leveled),
 
     BackendPause = app_helper:get_env(riak_kv, backend_pause_ms, ?PAUSE_TIME),
+    LCR = app_helper:get_env(riak_kv, leveled_reload_recalc, false),
 
     case get_data_dir(DataRoot, integer_to_list(Partition)) of
         {ok, DataDir} ->
             DBid = generate_partition_identity(Partition),
+            FN = filename:join(DataDir, "recalc.lock"),
+            {ok, ReloadStrategy} = 
+                case {LCR, filelib:is_file(FN)} of
+                    {true, true} ->
+                        {ok, recalc};
+                    {true, false} ->
+                        ok = filelib:ensure_dir(FN),
+                        ok = file:write_file(FN, term_to_binary(os:timestamp())),
+                        {ok, recalc};
+                    {false, true} ->
+                        {ok, TS} = file:read_file(FN),
+                        LockTS = calendar:now_to_datetime(binary_to_term(TS)),
+                        lager:error("Cannot start in retain mode " ++
+                                        "due to recalc being set on ~w " ++
+                                        "see FN ~s",
+                                        [LockTS, FN]),
+                        {error, invalid_compaction_change};
+                    {false, false} ->
+                        {ok, retain}
+                end,
+
             StartOpts = [{root_path, DataDir},
                             {max_journalsize, MJS},
                             {max_journalobjectcount, MJC},
@@ -146,7 +168,8 @@ start(Partition, Config) ->
                             {maxrunlength_compactionpercentage, MCP},
                             {singlefile_compactionpercentage, SCP},
                             {snapshot_timeout_short, TOS},
-                            {snapshot_timeout_long, TOL}],
+                            {snapshot_timeout_long, TOL},
+                            {reload_strategy, [{?RIAK_TAG, ReloadStrategy}]}],
             {ok, Bookie} = leveled_bookie:book_start(StartOpts),
             Ref = make_ref(),
             ValidHours = valid_hours(CLH, CTH),
@@ -368,7 +391,15 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{bookie=Bookie}) ->
     {async, ObjectFolder} =
         case {lists:keyfind(bucket, 1, Opts), 
                 lists:keyfind(index, 1, Opts)} of
-            {_, {index, FilterBucket, Q=?KV_INDEX_Q{}}} ->
+            {_, {index,
+                    FilterBucket,
+                    Q=?KV_INDEX_Q{start_key=StartKey0,
+                                    start_inclusive=StartInc}}} ->
+                StartKey = 
+                    case StartInc of
+                        true -> StartKey0;
+                        false -> leveled_codec:next_key(StartKey0)
+                    end,
                 % This is an undocumented thing - required by CS
                 % Copied as far as possible from eleveldb backend - as actual
                 % requirements not known
@@ -379,6 +410,7 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{bookie=Bookie}) ->
                         false ->
                             false
                     end,
+                
                 SpecialFoldFun = 
                     fun(ObjB, ObjK, Obj, InnerAcc) ->
                         case riak_index:object_key_in_range({ObjB, ObjK}, 
@@ -386,24 +418,46 @@ fold_objects(FoldObjectsFun, Acc, Opts, #state{bookie=Bookie}) ->
                             {true, _BK} ->
                                 case StndObjFold of   
                                     true ->
-                                        FoldObjectsFun(ObjB, ObjK, Obj, 
+                                        FoldObjectsFun(ObjB,
+                                                        ObjK,
+                                                        Obj, 
                                                         InnerAcc);
                                     false ->
                                         % Assumption here is that if this is 
                                         % not flagged as a standard object fold
                                         % it is using a fold_keys_fun -
                                         % so the object is disguised as a key
-                                        FoldObjectsFun(ObjB, {o, ObjK, Obj}, 
+                                        FoldObjectsFun(ObjB,
+                                                        {o, ObjK, Obj}, 
                                                         InnerAcc)
                                 end;
                             {skip, _BK} ->
-                                Acc
+                                InnerAcc;
+                            _ ->
+                                % This is expected when object_key_in_range
+                                % returns false - such as when the end of
+                                % range is reached.  An end key could be used
+                                % in the query - but control over end_inclusive
+                                % is gained by instead relying on this range
+                                % check.
+                                %
+                                % This aligns with riak_kv_eleveldb_backend.
+                                % Throw will be handled within riak_kv_worker
+                                % as throw:PrematureAcc - as leveled will
+                                % re-throw, and not expect {break, Acc} to
+                                % re-throw as with eleveldb
+                                throw(InnerAcc)
                         end
                     end,
+                EndKey = null,
+                % StartKey and StartInclusive based on query, but the EndKey
+                % and EndInclusive should be handled by the passed in fold
+                % function (by the riak_index range checker), so null is used
+                % for EndKey
                 leveled_bookie:book_objectfold(Bookie, 
                                                 ?RIAK_TAG,
                                                 FilterBucket, 
-                                                all, 
+                                                {StartKey, EndKey},
                                                 {SpecialFoldFun, Acc}, 
                                                 false);
             {false, false} ->

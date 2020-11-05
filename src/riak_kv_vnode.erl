@@ -22,6 +22,9 @@
 -module(riak_kv_vnode).
 -behaviour(riak_core_vnode).
 
+-compile({nowarn_deprecated_function, 
+            [{gen_fsm, send_event, 2}]}).
+
 %% API
 -export([test_vnode/1, put/7]).
 -export([start_vnode/1,
@@ -31,6 +34,7 @@
          head/3,
          head/4,
          del/3,
+         reap/3,
          put/6,
          local_get/2,
          local_put/2,
@@ -148,11 +152,18 @@
                     :: list(riak_kv_entropy_manager:exchange()),
                 tictac_exchangecount = 0 :: integer(),
                 tictac_deltacount = 0 :: integer(),
+                tictac_exchangetime = 0 :: integer(),
                 tictac_startqueue = os:timestamp() :: erlang:timestamp(),
                 tictac_rebuilding = false :: erlang:timestamp()|false,
+                tictac_skiptick = 0 :: non_neg_integer(),
+                tictac_startup = true :: boolean(),
+                aae_tokenbucket = true :: boolean(),
                 worker_pool_strategy = single :: none|single|dscp,
                 vnode_pool_pid :: undefined|pid(),
-                update_hook :: update_hook()
+                update_hook :: update_hook(),
+                max_aae_queue_time :: non_neg_integer(),
+                enable_nextgenreplsrc = false :: boolean(),
+                sizelimit_nextgenreplsrc = 0 :: non_neg_integer()
                }).
 
 -type index_op() :: add | remove.
@@ -199,6 +210,11 @@
 
 -define(MAX_REBUILD_TIME, 86400).
 
+-define(MAX_AAE_QUEUE_TIME, 1000). 
+    %% Queue time in ms to prompt a sync ping.
+-define(AAE_SKIP_COUNT, 10).
+-define(AAE_LOADING_WAIT, 5000).
+
 -define(AF1_QUEUE, riak_core_node_worker_pool:af1()).
     %% Assured Forwarding - pool 1
     %% Hot backups
@@ -211,7 +227,8 @@
     %% the cached tree do not use a pool (e.g. n_val queries)
 -define(AF4_QUEUE, riak_core_node_worker_pool:af4()).
     %% Assured Forwarding - pool 4
-    %% perational information queries (e.g. object_stats)
+    %% operational information queries (e.g. object_stats).  Replication folds
+    %% for transition.  Reaping operations
 -define(BE_QUEUE, riak_core_node_worker_pool:be()).
     %% Best efforts (aka scavenger) pool
     %% Rebuilds
@@ -309,12 +326,11 @@ maybe_start_aaecontroller(active, State=#state{mod=Mod,
     XTick = app_helper:get_env(riak_kv, tictacaae_exchangetick),
     RTick = app_helper:get_env(riak_kv, tictacaae_rebuildtick),
 
+    StepInitialTick =
+        app_helper:get_env(riak_kv, tictacaae_stepinitialtick, true),
+
     StoreHead = app_helper:get_env(riak_kv, tictacaae_storeheads),
-    ObjSplitFun = 
-        case StoreHead of
-            true -> fun from_object_binary/1;
-            false -> fun from_object_binary_headless/1
-        end,
+    ObjSplitFun = riak_object:aae_from_object_binary(StoreHead),
 
     {ok, AAECntrl} = 
         aae_controller:aae_start(KeyStoreType, 
@@ -323,58 +339,36 @@ maybe_start_aaecontroller(active, State=#state{mod=Mod,
                                     Preflists, 
                                     RootPath, 
                                     ObjSplitFun),
-    R = aae_controller:aae_rebuildtrees(AAECntrl, 
-                                        Preflists, 
-                                        fun preflistfun/2, 
-                                        rebuildtrees_workerfun(Partition, 
-                                                                State),
-                                        true),
-    lager:info("AAE Controller started with pid ~w and rebuild state ~w", 
-                [AAECntrl, R]),
-    Rebuilding = 
-        case R of
-            ok -> 
-                os:timestamp();
-            skipped ->
-                false
-        end,
+    lager:info("AAE Controller started with pid=~w", [AAECntrl]),
     
     InitD = erlang:phash2(Partition, 256),
-    % Space out the initial poke to avoid over-coordination between vnodes
-    FirstRebuildDelay = (RTick div 256) * InitD,
-    FirstExchangeDelay = (XTick div 256) * InitD,
+    % Space out the initial poke to avoid over-coordination between vnodes,
+    % each of up to 256 vnodes will end on a different point in the slot, with
+    % the points wrapping every 256 vnodes (assuming coordinated restart)    
+    FirstRebuildDelay = RTick + ((RTick div 256) * InitD),
+    FirstExchangeDelay = XTick + ((XTick div 256) * InitD),
     riak_core_vnode:send_command_after(FirstRebuildDelay, 
                                         tictacaae_rebuildpoke),
     riak_core_vnode:send_command_after(FirstExchangeDelay, 
                                         tictacaae_exchangepoke),
+    
+    InitalStep =
+        case StepInitialTick of
+            true ->
+                % Stops each vnode from re-filling the AAE work queue at the
+                % same time, creating a pause in AAE across the cluster if all
+                % nodes in the cluster were started concurrently
+                erlang:phash2(Partition, 8);
+            false ->
+                % During riak_test we set this to false
+                0
+        end,
 
     State#state{tictac_aae = true,
                 aae_controller = AAECntrl,
                 modstate = ModState,
-                tictac_rebuilding = Rebuilding}.
-
-
--spec from_object_binary(binary()) ->
-        {integer(), integer(), integer(), list(erlang:timestamp()), binary()}.
-%% @doc
-%% When folding over objects need to be able to convert from the object into 
-%% a tuple of metadata for the AAE keystore
-from_object_binary(RobjBin) ->
-    {_Clock, Size, SibCount, LastMods, SibsBin} =
-        riak_object:summary_from_binary(RobjBin),
-    % TODO: Actually get the index hash
-    {Size, SibCount, 0, LastMods, SibsBin}.
-
--spec from_object_binary_headless(binary()) ->
-        {integer(), integer(), integer(), list(erlang:timestamp()), binary()}.
-%% @doc
-%% When folding over objects need to be able to convert from the object into 
-%% a tuple of metadata for the AAE keystore
-from_object_binary_headless(RobjBin) ->
-    {_Clock, Size, SibCount, LastMods, _SibsBin} =
-        riak_object:summary_from_binary(RobjBin),
-    % TODO: Actually get the index hash
-    {Size, SibCount, 0, LastMods, term_to_binary(null)}.
+                tictac_rebuilding = false,
+                tictac_skiptick = InitalStep}.
 
 
 -spec determine_aaedata_root(integer()) -> list().
@@ -395,16 +389,18 @@ preflistfun(Bucket, Key) -> riak_kv_util:get_index_n({Bucket, Key}).
 %% Function to be passed to return a response once an operation is complete
 tictac_returnfun(Partition, exchange) ->
     Vnode = {Partition, node()},
+    StartTime = os:timestamp(),
     ReturnFun = 
         fun(ExchangeResult) ->
-            ok = tictacexchange_complete(Vnode, ExchangeResult)
+            ok = tictacexchange_complete(Vnode, StartTime, ExchangeResult)
         end,
     ReturnFun;
 tictac_returnfun(Partition, RebuildType) ->
     Vnode = {Partition, node()},
+    StartTime = os:timestamp(),
     ReturnFun = 
         fun(ok) ->
-            ok = tictacrebuild_complete(Vnode, RebuildType)
+            ok = tictacrebuild_complete(Vnode, StartTime, RebuildType)
         end,
     ReturnFun.
 
@@ -419,26 +415,70 @@ tictac_rebuild(B, K, V) ->
     Clock = element(1, riak_object:summary_from_binary(V)),
     {IndexN, Clock}.
 
--spec rebuildtrees_workerfun(partition(), state()) -> fun().
 %% @doc
-%% A wrapper around the node_worker_pool to provide workers for tictac aae
-%% folds.  As the pool is a named pool started with riak_core, should be safe
-%% to used in init of inidivdual vnodes.
-rebuildtrees_workerfun(Partition, State) ->
-    fun(FoldFun, FinishFun) ->
-        Sender = self(),
-        ReturnFun = tictac_returnfun(Partition, trees),
-        FinishPlusReturnFun =
-            fun(WorkOutput) ->
-                FinishFun(WorkOutput),
-                ReturnFun(ok)
+%% Queue a tictac tree rebuild.  There are occasions when all vnodes queue this
+%% at the same time, so important that the snapshot for the rebuild is taken
+%% only when the fold is initiated.  Otherwise the snapshot may expire whilst
+%% sat on the queue
+-spec queue_tictactreerebuild(pid(), partition(), boolean(), state()) -> ok.
+queue_tictactreerebuild(AAECntrl, Partition, OnlyIfBroken, State) ->
+    Preflists = riak_kv_util:responsible_preflists(Partition),
+    Sender = self(),
+    ReturnFun = tictac_returnfun(Partition, trees),
+    FoldFun =
+        fun() ->
+            lager:info("Starting tree rebuild for partition=~w", [Partition]),
+            SW = os:timestamp(),
+            case when_loading_complete(AAECntrl,
+                                        Preflists,
+                                        fun preflistfun/2,
+                                        OnlyIfBroken) of
+                {ok, StoreFold, FinishFun} ->
+                    Output = StoreFold(),
+                    FinishFun(Output),
+                    Duration =
+                        timer:now_diff(os:timestamp(), SW) div (1000 * 1000),
+                    lager:info("Tree rebuild complete for partition=~w" ++
+                                " in duration=~w seconds", 
+                                [Partition, Duration]);
+                skipped ->
+                    lager:info("Tree rebuild skipped for partition=~w",
+                                [Partition])
             end,
-        Pool = select_queue(be_pool, State),
-        riak_core_vnode:queue_work(Pool, 
-                                    {fold, FoldFun, FinishPlusReturnFun},
-                                    Sender,
-                                    State#state.vnode_pool_pid)
+            ok
+        end,
+    JustReturnFun =
+        fun(ok) ->
+            ReturnFun(ok)
+        end,
+    Pool = select_queue(be_pool, State),
+    riak_core_vnode:queue_work(Pool, 
+                                {fold, FoldFun, JustReturnFun},
+                                Sender,
+                                State#state.vnode_pool_pid).
+
+when_loading_complete(AAECntrl, Preflists, PreflistFun, OnlyIfBroken) ->
+    case is_process_alive(AAECntrl) of
+        true ->
+            R = aae_controller:aae_rebuildtrees(AAECntrl,
+                                                Preflists, PreflistFun,
+                                                OnlyIfBroken),
+            case R of
+                loading ->
+                    timer:sleep(?AAE_LOADING_WAIT),
+                    when_loading_complete(AAECntrl,
+                                            Preflists,
+                                            PreflistFun,
+                                            OnlyIfBroken);
+                _ ->
+                    R
+            end;
+        _ ->
+            % May have queued a rebuild for a vnode aae controller for an
+            % exited vnode (e.g. one which has completed handoff)
+            skipped
     end.
+
 
 %% @doc Reveal the underlying module state for testing
 -spec(get_modstate(state()) -> {atom(), state()}).
@@ -491,21 +531,28 @@ aae_send(Preflist) ->
                                         riak_kv_vnode_master)
     end.
 
--spec tictacrebuild_complete({partition(), node()}, store|trees) -> ok.
+-spec tictacrebuild_complete({partition(), node()},
+                                erlang:timestamp(),
+                                store|trees) -> ok.
 %% @doc
 %% Inform the vnode that an aae rebuild is complete
-tictacrebuild_complete(Vnode, ProcessType) ->
+tictacrebuild_complete(Vnode, StartTime, ProcessType) ->
     riak_core_vnode_master:command(Vnode, 
-                                    {rebuild_complete, ProcessType},
+                                    {rebuild_complete,
+                                        ProcessType,
+                                        StartTime},
                                     riak_kv_vnode_master).
 
--spec tictacexchange_complete({partition(), node()}, 
+-spec tictacexchange_complete({partition(), node()},
+                                erlang:timestamp(),
                                 {atom(), non_neg_integer()}) -> ok.
 %% @doc
 %% Infor the vnode that an aae exchange is complete
-tictacexchange_complete(Vnode, ExchangeResult) ->
+tictacexchange_complete(Vnode, StartTime, ExchangeResult) ->
     riak_core_vnode_master:command(Vnode, 
-                                    {exchange_complete, ExchangeResult},
+                                    {exchange_complete,
+                                        ExchangeResult,
+                                        StartTime},
                                     riak_kv_vnode_master).
 
 get(Preflist, BKey, ReqId) ->
@@ -535,6 +582,21 @@ head(Preflist, BKey, ReqId, Sender) ->
 del(Preflist, BKey, ReqId) ->
     Req = riak_kv_requests:new_delete_request(sanitize_bkey(BKey), ReqId),
     riak_core_vnode_master:command(Preflist, Req, riak_kv_vnode_master).
+
+%% @doc
+%% Reap a tombstone, assuming a preflist of UP primaries.
+-spec reap(riak_core_apl:preflist(),
+            {riak_object:bucket(), riak_object:key()},
+            non_neg_integer()) -> ok.
+reap(Preflist, {Bucket, Key}, DeleteHash) ->
+    Req = riak_kv_requests:new_reap_request({Bucket, Key}, DeleteHash),
+    [{Idx, Node}|Rest] = Preflist,
+    %% For the head of the preflist we do this sync, to regulate the pace of
+    %% reaps and help prevent overloading of vnodes.
+    ok = riak_core_vnode_master:sync_command({Idx, Node},
+                                                Req,
+                                                riak_kv_vnode_master),
+    riak_core_vnode_master:command(Rest, Req, riak_kv_vnode_master).
 
 %% Issue a put for the object to the preflist, expecting a reply
 %% to an FSM.
@@ -743,6 +805,14 @@ init([Index]) ->
         app_helper:get_env(riak_kv, tictacaae_active, passive),
     WorkerPoolStrategy =
         app_helper:get_env(riak_kv, worker_pool_strategy),
+    TokenBucket =
+        app_helper:get_env(riak_kv, aae_tokenbucket, true),
+    MaxAAEQueueTime =
+        app_helper:get_env(riak_kv, max_aae_queue_time, ?MAX_AAE_QUEUE_TIME),
+    EnableNextGenReplSrc = 
+        app_helper:get_env(riak_kv, replrtq_enablesrc, false),
+    SizeLimitNextGenReplSrc = 
+        app_helper:get_env(riak_kv, replrtq_srcobjectsize, 0),
 
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
@@ -769,7 +839,11 @@ init([Index]) ->
                            md_cache=MDCache,
                            md_cache_size=MDCacheSize,
                            worker_pool_strategy=WorkerPoolStrategy,
-                           update_hook=update_hook()},
+                           update_hook=update_hook(),
+                           max_aae_queue_time=MaxAAEQueueTime,
+                           aae_tokenbucket=TokenBucket,
+                           enable_nextgenreplsrc = EnableNextGenReplSrc,
+                           sizelimit_nextgenreplsrc = SizeLimitNextGenReplSrc},
             try_set_vnode_lock_limit(Index),
             case AsyncFolding of
                 true ->
@@ -1008,41 +1082,47 @@ handle_command({fold_indexes, FoldIndexFun, Acc}, Sender, State=#state{mod=Mod, 
     end;
 
 
-handle_command({rebuild_complete, store}, _Sender, State) ->
+handle_command({rebuild_complete, store, ST}, _Sender, State) ->
     %% If store rebuild complete - then need to rebuild trees
     AAECntrl = State#state.aae_controller,
     Partition = State#state.idx,
-    Preflists = riak_kv_util:responsible_preflists(Partition),
-    aae_controller:aae_rebuildtrees(AAECntrl,
-                                    Preflists,
-                                    fun preflistfun/2, 
-                                    rebuildtrees_workerfun(Partition, State),
-                                    false),
-    lager:info("AAE Controller rebuild trees started with pid ~w", [AAECntrl]),
+    lager:info("AAE pid=~w partition=~w rebuild store complete " ++
+                "in duration=~w seconds",
+                [AAECntrl,
+                    Partition,
+                    timer:now_diff(os:timestamp(), ST) div (1000 * 1000)]),
+    queue_tictactreerebuild(AAECntrl, Partition, false, State),
+    lager:info("AAE pid=~w rebuild trees queued", [AAECntrl]),
     {noreply, State};
 
-handle_command({rebuild_complete, trees}, _Sender, State) ->
+handle_command({rebuild_complete, trees, _ST}, _Sender, State) ->
     % Rebuilding the trees now complete, so change the status of the 
     % rebuilding state so other rebuilds may be prompted
     Partition = State#state.idx,
     case State#state.tictac_rebuilding of
         false ->
             lager:warning("Rebuild complete for Partition=~w but not expected",
-                        [Partition]),
+                            [Partition]),
             {noreply, State};
         TS ->
-            RebuildTime = timer:now_diff(os:timestamp(), TS) / (1000 * 1000),
-            lager:info("Rebuild complete for " ++ 
-                            "Partition=~w in duration=~w seconds",
-                        [Partition, RebuildTime]),
+            ProcessTime = timer:now_diff(os:timestamp(), TS) div (1000 * 1000),
+            lager:info("Rebuild process for partition=~w complete in " ++
+                        "duration=~w seconds", [Partition, ProcessTime]),
             {noreply, State#state{tictac_rebuilding = false}}
     end;
 
-handle_command({exchange_complete, {_EndState, DeltaCount}}, _Sender, State) ->
+handle_command({exchange_complete, {_EndState, DeltaCount}, ST},
+                                                    _Sender, State) ->
     %% Record how many deltas were seen in the exchange
+    %% Revert the skip_count to 0 so that exchanges can be made at the next
+    %% prompt.
     XC = State#state.tictac_exchangecount + 1,
     DC = State#state.tictac_deltacount + DeltaCount,
-    {noreply, State#state{tictac_exchangecount = XC, tictac_deltacount = DC}};
+    XT = State#state.tictac_exchangetime + timer:now_diff(os:timestamp(), ST),
+    {noreply, State#state{tictac_exchangecount = XC,
+                            tictac_deltacount = DC,
+                            tictac_exchangetime = XT,
+                            tictac_skiptick = 0}};
 
 handle_command({upgrade_hashtree, Node}, _, State=#state{hashtrees=HT}) ->
     %% Make sure we dont kick off an upgrade during a possible handoff
@@ -1079,8 +1159,8 @@ handle_command(tictacaae_exchangepoke, _Sender, State) ->
     XTick = app_helper:get_env(riak_kv, tictacaae_exchangetick),
     riak_core_vnode:send_command_after(XTick, tictacaae_exchangepoke),
     Idx = State#state.idx,
-    case State#state.tictac_exchangequeue of
-        [] ->
+    case {State#state.tictac_exchangequeue, State#state.tictac_skiptick} of
+        {[], _} ->
             {ok, Ring} = 
                 riak_core_ring_manager:get_my_ring(),
             Exchanges = 
@@ -1088,21 +1168,30 @@ handle_command(tictacaae_exchangepoke, _Sender, State) ->
             Now = os:timestamp(),
             LoopDuration = 
                 timer:now_diff(Now, State#state.tictac_startqueue),
+            % This log has a different behaviour at startup.  At startup we
+            % will have scheduled the loop without completing any, so the first
+            % iteration of this log will always show exchanges_completed=0
+            % This is normal.  On subsequent runs we expected to see expected
+            % and complete to be aligned (and the loop duration with be about
+            % expected * tictacaae_exchangetick).
             lager:info("Tictac AAE loop completed for partition=~w with "
                             ++ "exchanges expected=~w "
                             ++ "exchanges completed=~w "
                             ++ "total deltas=~w "
+                            ++ "total exchange_time=~w seconds "
                             ++ "loop duration=~w seconds (elapsed)",
                         [Idx,
                             length(Exchanges),
                             State#state.tictac_exchangecount,
                             State#state.tictac_deltacount,
+                            State#state.tictac_exchangetime div (1000 * 1000),
                             LoopDuration div (1000 * 1000)]),
             {noreply, State#state{tictac_exchangequeue = Exchanges,
                                     tictac_exchangecount = 0,
                                     tictac_deltacount = 0,
+                                    tictac_exchangetime = 0,
                                     tictac_startqueue = Now}};
-        [{Local, Remote, {DocIdx, N}}|Rest] ->
+        {[{Local, Remote, {DocIdx, N}}|Rest], 0} ->
             PrimaryOnly =
                 app_helper:get_env(riak_kv, tictacaae_primaryonly, true),
                 % By default TictacAAE exchanges are run only between primary
@@ -1119,30 +1208,70 @@ handle_command(tictacaae_exchangepoke, _Sender, State) ->
                     false ->
                         riak_core_apl:get_apl(PlLup, N, riak_kv)
                 end,
-            case {lists:keyfind(Local, 1, PL), lists:keyfind(Remote, 1, PL)} of
-                {{Local, LN}, {Remote, RN}} ->
-                    IndexN = {DocIdx, N},
-                    BlueList = 
-                        [{riak_kv_vnode:aae_send({Local, LN}), [IndexN]}],
-                    PinkList = 
-                        [{riak_kv_vnode:aae_send({Remote, RN}), [IndexN]}],
-                    RepairFun = 
-                        riak_kv_get_fsm:prompt_readrepair([{Local, LN}, 
-                                                            {Remote, RN}]),
-                    ReplyFun = tictac_returnfun(Idx, exchange),
-                    aae_exchange:start(BlueList, 
-                                        PinkList, 
-                                        RepairFun, 
-                                        ReplyFun);
-                _ ->
-                    lager:warning("Proposed exchange between ~w and ~w " ++ 
-                                    "not currently supported within " ++
-                                    "preflist for IndexN=~w possibly due to " ++
-                                    "node failure",
-                                    [Local, Remote, {DocIdx, N}])
-            end,
-            {noreply, State#state{tictac_exchangequeue = Rest}}
+            SkipCount =
+                case {lists:keyfind(Local, 1, PL),
+                        lists:keyfind(Remote, 1, PL)} of
+                    {{Local, LN}, {Remote, RN}} ->
+                        IndexN = {DocIdx, N},
+                        BlueList = 
+                            [{riak_kv_vnode:aae_send({Local, LN}), [IndexN]}],
+                        PinkList = 
+                            [{riak_kv_vnode:aae_send({Remote, RN}), [IndexN]}],
+                        RepairFun = 
+                            riak_kv_get_fsm:prompt_readrepair([{Local, LN}, 
+                                                                {Remote, RN}]),
+                        ReplyFun = tictac_returnfun(Idx, exchange),
+                        ScanTimeout = ?AAE_SKIP_COUNT * XTick,
+                        ExchangeOptions =
+                            case app_helper:get_env(riak_kv,
+                                                    tictacaae_maxresults) of
+                                MR when is_integer(MR) ->
+                                    [{scan_timeout, ScanTimeout},
+                                        {max_results, MR}];
+                                _ ->
+                                    [{scan_timeout, ScanTimeout}]
+                            end,
+                        aae_exchange:start(full,
+                                            BlueList, 
+                                            PinkList, 
+                                            RepairFun, 
+                                            ReplyFun,
+                                            none,
+                                            ExchangeOptions),
+                        ?AAE_SKIP_COUNT;
+                    _ ->
+                        lager:warning("Proposed exchange between ~w and ~w " ++ 
+                                        "not currently supported within " ++
+                                        "preflist for IndexN=~w possibly " ++
+                                        "due to node failure",
+                                        [Local, Remote, {DocIdx, N}]),
+                            0
+                end,
+            ok = aae_controller:aae_ping(State#state.aae_controller,
+                                            os:timestamp(),
+                                            self()),
+            {noreply, State#state{tictac_exchangequeue = Rest,
+                                    tictac_skiptick = SkipCount}};
+        {_, SkipCount} ->
+            lager:warning("Skipping a tick due to non_zero " ++
+                            "skip_count=~w", [SkipCount]),
+            {noreply, State#state{tictac_skiptick = max(0, SkipCount - 1)}}
     end;
+
+handle_command(tictacaae_rebuildpoke, _Sender, State=#state{tictac_startup=TS})
+                                when TS == true ->
+    % On startup the first poke should check if the trees need rebuilding, e.g.
+    % as the tree was not persisted when shutdown.  This won't rebuild unless
+    % the trees have been marked as broken.  Trees are marked as broken in a
+    % non-empty store where trees do not exist.
+    RTick = app_helper:get_env(riak_kv, tictacaae_rebuildtick),
+    riak_core_vnode:send_command_after(RTick, tictacaae_rebuildpoke),
+    AAECntrl = State#state.aae_controller,
+    Partition = State#state.idx,
+    queue_tictactreerebuild(AAECntrl, Partition, true, State),
+    {noreply, State#state{tictac_rebuilding = os:timestamp(),
+                            tictac_startup = false}};
+
 
 handle_command(tictacaae_rebuildpoke, Sender, State) ->
     NRT = aae_controller:aae_nextrebuild(State#state.aae_controller),
@@ -1150,7 +1279,7 @@ handle_command(tictacaae_rebuildpoke, Sender, State) ->
     riak_core_vnode:send_command_after(RTick, tictacaae_rebuildpoke),
     TimeToRebuild = timer:now_diff(NRT, os:timestamp()),
     RebuildPending = State#state.tictac_rebuilding =/= false,
-
+    
     case {TimeToRebuild < 0, RebuildPending} of 
         {false, _} ->
             lager:info("No rebuild as next_rebuild=~w seconds in the future",
@@ -1174,6 +1303,8 @@ handle_command(tictacaae_rebuildpoke, Sender, State) ->
             {noreply, State};
         {true, false} ->
             % Next Rebuild Time is in the past - prompt a rebuild
+            lager:info("Prompting tictac_aae rebuild for controller=~w", 
+                        [State#state.aae_controller]),
             ReturnFun = tictac_returnfun(State#state.idx, store),
             State0 = State#state{tictac_rebuilding = os:timestamp()},
             case aae_controller:aae_rebuildstore(State#state.aae_controller, 
@@ -1216,7 +1347,7 @@ handle_command({mapexec_error_noretry, JobId, Err}, _Sender, #state{mrjobs=Jobs}
                    {ok, Job} ->
                        Jobs1 = dict:erase(JobId, Jobs),
                        #mrjob{target=Target} = Job,
-                       gen_fsm_compat:send_event(Target, {mapexec_error_noretry, self(), Err}),
+                       gen_fsm:send_event(Target, {mapexec_error_noretry, self(), Err}),
                        State#state{mrjobs=Jobs1};
                    error ->
                        State
@@ -1227,7 +1358,7 @@ handle_command({mapexec_reply, JobId, Result}, _Sender, #state{mrjobs=Jobs}=Stat
                    {ok, Job} ->
                        Jobs1 = dict:erase(JobId, Jobs),
                        #mrjob{target=Target} = Job,
-                       gen_fsm_compat:send_event(Target, {mapexec_reply, Result, self()}),
+                       gen_fsm:send_event(Target, {mapexec_reply, Result, self()}),
                        State#state{mrjobs=Jobs1};
                    error ->
                        State
@@ -1400,7 +1531,11 @@ handle_request(kv_delete_request, Req, _Sender, State) ->
     do_delete(BKey, State);
 handle_request(kv_vclock_request, Req, _Sender, State) ->
     BKeys = riak_kv_requests:get_bucket_keys(Req),
-    {reply, do_get_vclocks(BKeys, State), State}.
+    {reply, do_get_vclocks(BKeys, State), State};
+handle_request(kv_reap_request, Req, _Sender, State) ->
+    BKey = riak_kv_requests:get_bucket_key(Req),
+    DeleteHash = riak_kv_requests:get_delete_hash(Req),
+    {reply, ok, final_delete(BKey, DeleteHash, State)}.
 
 
 handle_coverage_request(kv_listkeys_request, Req, FilterVNodes, Sender, State) ->
@@ -1632,6 +1767,39 @@ handle_aaefold({fetch_clocks_range,
                                 InitAcc, 
                                 [{clock, null}]),
     {select_queue(?AF3_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
+handle_aaefold({repl_keys_range,
+                        Bucket, KeyRange,
+                        ModifiedRange,
+                        QueueName},
+                    InitAcc, _Nval,
+                    IndexNs, Filtered, ReturnFun, Cntrl, Sender,
+                    State) ->
+    FoldFun =
+        fun(BF, KF, EFs, Acc) ->
+            {clock, VV} = lists:keyfind(clock, 1, EFs),
+            RE = {BF, KF, VV, to_fetch},
+            {AccL, Count, QueueName, BatchSize} = Acc,
+            case Count rem BatchSize of
+                0 ->
+                    riak_kv_replrtq_src:replrtq_aaefold(QueueName, AccL),
+                    {[RE], Count + 1, QueueName, BatchSize};
+                _ ->
+                    {[RE|AccL], Count + 1, QueueName, BatchSize}
+            end
+        end,
+    WrappedFoldFun = aaefold_withcoveragecheck(FoldFun, IndexNs, Filtered),
+    RangeLimiter = aaefold_setrangelimiter(Bucket, KeyRange),
+    ModifiedLimiter = aaefold_setmodifiedlimiter(ModifiedRange),
+    {async, Folder} = 
+        aae_controller:aae_fold(Cntrl, 
+                                RangeLimiter,
+                                all,
+                                ModifiedLimiter,
+                                false,
+                                WrappedFoldFun, 
+                                InitAcc, 
+                                [{clock, null}]),
+    {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
 handle_aaefold({find_keys, 
                         Bucket, KeyRange,
                         ModifiedRange,
@@ -1692,6 +1860,128 @@ handle_aaefold({find_keys,
                                 InitAcc, 
                                 [{size, null}]),
     {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
+handle_aaefold({find_tombs, 
+                        Bucket, KeyRange,
+                        SegmentFilter, ModifiedRange},
+                    InitAcc, _Nval,
+                    IndexNs, Filtered, ReturnFun, Cntrl, Sender,
+                    State) ->
+    FoldFun =
+        fun(BF, KF, EFs, TombHashAcc) ->
+            {md, MD} = lists:keyfind(md, 1, EFs),
+            case riak_object:is_aae_object_deleted(MD, false) of
+                {true, undefined} ->
+                    {clock, VV} = lists:keyfind(clock, 1, EFs),
+                    [{BF, KF, riak_object:delete_hash(VV)}|TombHashAcc];
+                {false, undefined} ->
+                    TombHashAcc
+            end
+        end,
+    WrappedFoldFun = aaefold_withcoveragecheck(FoldFun, IndexNs, Filtered),
+    RangeLimiter = aaefold_setrangelimiter(Bucket, KeyRange),
+    ModifiedLimiter = aaefold_setmodifiedlimiter(ModifiedRange),
+    {async, Folder} =
+        aae_controller:aae_fold(Cntrl, 
+                                RangeLimiter,
+                                SegmentFilter,
+                                ModifiedLimiter,
+                                false,
+                                WrappedFoldFun, 
+                                InitAcc, 
+                                [{md, null}, {clock, null}]),
+    {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
+handle_aaefold({reap_tombs, 
+                        Bucket, KeyRange,
+                        SegmentFilter, ModifiedRange,
+                        ReapMethod},
+                    InitAcc, _Nval,
+                    IndexNs, Filtered, ReturnFun, Cntrl, Sender,
+                    State) ->
+    FoldFun =
+        fun(BF, KF, EFs, TombHashAcc) ->
+            {md, MD} = lists:keyfind(md, 1, EFs),
+            case riak_object:is_aae_object_deleted(MD, false) of
+                {true, undefined} ->
+                    {clock, VV} = lists:keyfind(clock, 1, EFs),
+                    DH = riak_object:delete_hash(VV),
+                    case ReapMethod of
+                        local ->
+                            riak_kv_reaper:request_reap({{BF, KF}, DH}),
+                            NewCount = element(2, TombHashAcc) + 1,
+                            setelement(2, TombHashAcc, NewCount);
+                        count ->
+                            NewCount = element(2, TombHashAcc) + 1,
+                            setelement(2, TombHashAcc, NewCount);
+                        {job, _JobID} ->
+                            {[{{BF, KF}, DH}|element(1, TombHashAcc)],
+                                element(2, TombHashAcc),
+                                element(3, TombHashAcc)}
+                    end;
+                {false, undefined} ->
+                    TombHashAcc
+            end
+        end,
+    WrappedFoldFun = aaefold_withcoveragecheck(FoldFun, IndexNs, Filtered),
+    RangeLimiter = aaefold_setrangelimiter(Bucket, KeyRange),
+    ModifiedLimiter = aaefold_setmodifiedlimiter(ModifiedRange),
+    {async, Folder} =
+        aae_controller:aae_fold(Cntrl, 
+                                RangeLimiter,
+                                SegmentFilter,
+                                ModifiedLimiter,
+                                false,
+                                WrappedFoldFun, 
+                                InitAcc, 
+                                [{md, null}, {clock, null}]),
+    {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
+handle_aaefold({erase_keys, 
+                        Bucket, KeyRange,
+                        SegmentFilter, ModifiedRange,
+                        DeleteMethod},
+                    InitAcc, _Nval,
+                    IndexNs, Filtered, ReturnFun, Cntrl, Sender,
+                    State) ->
+    FoldFun =
+        fun(BF, KF, EFs, EraseKeyAcc) ->
+            {md, MD} = lists:keyfind(md, 1, EFs),
+            %% This might be a tombstone, and what to avoid simply creating an
+            %% update tombstone
+            %% If storeheads is false, then will not check for tombstone. In
+            %% this case fetch_clocks may be used, and an external get/delete
+            %% be called
+            case riak_object:is_aae_object_deleted(MD, false) of
+                {true, undefined} ->
+                    EraseKeyAcc;
+                {false, undefined} ->
+                    {clock, VV} = lists:keyfind(clock, 1, EFs),
+                    case DeleteMethod of
+                        local ->
+                            riak_kv_eraser:request_delete({{BF, KF}, VV}),
+                            NewCount = element(2, EraseKeyAcc) + 1,
+                            setelement(2, EraseKeyAcc, NewCount);
+                        count ->
+                            NewCount = element(2, EraseKeyAcc) + 1,
+                            setelement(2, EraseKeyAcc, NewCount);
+                        {job, _JobID} ->
+                            {[{{BF, KF}, VV}|element(1, EraseKeyAcc)],
+                                element(2, EraseKeyAcc),
+                                element(3, EraseKeyAcc)}
+                    end
+            end
+        end,
+    WrappedFoldFun = aaefold_withcoveragecheck(FoldFun, IndexNs, Filtered),
+    RangeLimiter = aaefold_setrangelimiter(Bucket, KeyRange),
+    ModifiedLimiter = aaefold_setmodifiedlimiter(ModifiedRange),
+    {async, Folder} =
+        aae_controller:aae_fold(Cntrl, 
+                                RangeLimiter,
+                                SegmentFilter,
+                                ModifiedLimiter,
+                                false,
+                                WrappedFoldFun, 
+                                InitAcc, 
+                                [{md, null}, {clock, null}]),
+    {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
 handle_aaefold({object_stats, Bucket, KeyRange, ModifiedRange},
                     InitAcc, _Nval,
                     IndexNs, Filtered, ReturnFun, Cntrl, Sender,
@@ -1735,6 +2025,12 @@ handle_aaefold({object_stats, Bucket, KeyRange, ModifiedRange},
                                 WrappedFoldFun, 
                                 InitAcc, 
                                 [{sibcount, null}, {size, null}]),
+    {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State};
+handle_aaefold({list_buckets, Nval}, 
+                    _InitAcc, Nval,
+                    _IndexNs, _Filtered, ReturnFun, Cntrl, Sender,
+                    State) ->
+    {async, Folder} = aae_controller:aae_bucketlist(Cntrl),
     {select_queue(?AF4_QUEUE, State), {fold, Folder, ReturnFun}, Sender, State}.
 
 
@@ -2030,20 +2326,32 @@ delete(State=#state{status_mgr_pid=StatusMgr, mod=Mod, modstate=ModState}) ->
     %% clear vnodeid first, if drop removes data but fails
     %% want to err on the side of creating a new vnodeid
     {ok, cleared} = clear_vnodeid(StatusMgr),
-    UpdModState = case Mod:drop(ModState) of
-                      {ok, S} ->
-                          S;
-                      {error, Reason, S2} ->
-                          lager:error("Failed to drop ~p. Reason: ~p~n", [Mod, Reason]),
-                          S2
-                  end,
+    UpdModState =
+        case Mod:drop(ModState) of
+            {ok, S} ->
+                S;
+            {error, Reason, S2} ->
+                lager:error("Failed to drop ~p. Reason: ~p~n", [Mod, Reason]),
+                S2
+        end,
     case State#state.hashtrees of
         undefined ->
             ok;
         HT ->
             riak_kv_index_hashtree:destroy(HT)
     end,
-    {ok, State#state{modstate=UpdModState,vnodeid=undefined,hashtrees=undefined}}.
+    case State#state.tictac_aae of 
+        false ->
+            ok;
+        true ->
+            aae_controller:aae_destroy(State#state.aae_controller)
+    end,
+    {ok,
+        State#state{modstate = UpdModState,
+                    vnodeid = undefined,
+                    hashtrees = undefined,
+                    tictac_aae = false,
+                    aae_controller = undefined}}.
 
 terminate(_Reason, #state{idx=Idx, 
                             mod=Mod, modstate=ModState, 
@@ -2168,18 +2476,8 @@ handle_info({'DOWN', _, _, Pid, _}, State=#state{hashtrees=Pid}) ->
     {ok, State3};
 handle_info({'DOWN', _, _, _, _}, State) ->
     {ok, State};
-handle_info({final_delete, BKey, RObjHash}, State = #state{mod=Mod, modstate=ModState}) ->
-    UpdState = case do_get_term(BKey, Mod, ModState) of
-                   {{ok, RObj}, ModState1} ->
-                       case delete_hash(RObj) of
-                           RObjHash ->
-                               do_backend_delete(BKey, RObj, State#state{modstate=ModState1});
-                         _ ->
-                               State#state{modstate=ModState1}
-                       end;
-                   {{error, _}, ModState1} ->
-                       State#state{modstate=ModState1}
-               end,
+handle_info({final_delete, BKey, DeleteHash}, State) ->
+    UpdState = final_delete(BKey, DeleteHash, State),
     {ok, UpdState};
 handle_info({counter_lease, {FromPid, VnodeId, NewLease}}, State=#state{status_mgr_pid=FromPid, vnodeid=VnodeId}) ->
     #state{counter=CounterState} = State,
@@ -2192,7 +2490,35 @@ handle_info({counter_lease, {FromPid, NewVnodeId, NewLease}}, State=#state{statu
     CS1 = CounterState#counter_state{lease=NewLease, leasing=false, cnt=1},
     State2 = State#state{vnodeid=NewVnodeId, counter=CS1},
     lager:info("New Vnode id for ~p. Epoch counter rolled over.", [Idx]),
-    {ok, State2}.
+    {ok, State2};
+handle_info({aae_pong, QueueTime}, State) ->
+    ok = riak_kv_stat:update({controller_queue, QueueTime}),
+    QueueTimeMS = QueueTime div 1000,
+    case QueueTimeMS >= State#state.max_aae_queue_time of
+        true ->
+            lager:info("AAE queue queue_time=~w ms prompting sync ping",
+                        [QueueTimeMS]),
+            StartDrain = os:timestamp(),
+            R = aae_controller:aae_ping(State#state.aae_controller,
+                                        StartDrain,
+                                        {sync, max(1, QueueTimeMS)}),
+            case R of
+                ok ->
+                    DrainTime =
+                        timer:now_diff(os:timestamp(), StartDrain) div 1000,
+                    lager:info("AAE queue drained in ~w ms", [DrainTime]);
+                timeout ->
+                    lager:warning("AAE queue not yet drained due to timeout")
+            end;
+        false ->
+            ok
+    end,
+    {ok, State};
+handle_info({Ref, ok}, State) ->
+    lager:info("Ignoring ok returned after timeout for Ref ~p", [Ref]),
+    {ok, State}.
+
+    
 
 handle_exit(Pid, Reason, State=#state{status_mgr_pid=Pid, idx=Index, counter=CntrState}) ->
     lager:error("Vnode status manager exit ~p", [Reason]),
@@ -2262,7 +2588,7 @@ do_put(Sender, Request, State) ->
 
 %% @private
 %% upon receipt of a client-initiated put
-do_put(Sender, {Bucket,_Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
+do_put(Sender, {Bucket, _Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
     BProps =  case proplists:get_value(bucket_props, Options) of
                   undefined ->
                       riak_core_bucket:get_bucket(Bucket);
@@ -2296,6 +2622,29 @@ do_put(Sender, {Bucket,_Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
     update_index_write_stats(UpdPutArgs#putargs.is_index, UpdPutArgs#putargs.index_specs),
     {Reply, UpdState}.
 
+
+%% @doc Remove a tombstone, assuming the state of the object currently in the
+%% store is the same tombstone from when the removal decision was made 
+-spec final_delete({riak_core_bucket:bucket(), riak_object:key()},
+                    non_neg_integer(),
+                    #state{}) -> #state{}.
+final_delete(BKey, DeleteHash, State = #state{mod=Mod, modstate=ModState}) ->
+    case do_get_term(BKey, Mod, ModState) of
+        {{ok, RObj}, ModState1} ->
+            case {riak_kv_util:is_x_deleted(RObj),
+                    riak_object:delete_hash(RObj)} of
+                {true, DeleteHash} ->
+                    do_backend_delete(BKey, RObj, State#state{modstate=ModState1});
+                {IsDeleted, OtherHash} ->
+                    lager:info("Final delete failure " ++
+                                "~p deleted ~w hashes ~w ~w",
+                                [BKey, IsDeleted, DeleteHash, OtherHash]),
+                    State#state{modstate=ModState1}
+            end;
+        {{error, _}, ModState1} ->
+            State#state{modstate=ModState1}
+    end.
+
 -spec do_backend_delete(
     {riak_core_bucket:bucket(), riak_object:key()},
     riak_object:riak_object(), #state{}
@@ -2322,10 +2671,6 @@ do_backend_delete(BKey, RObj, State = #state{idx = Idx,
         {error, _Reason, UpdModState} ->
             State#state{modstate = UpdModState}
     end.
-
-%% Compute a hash of the deleted object
-delete_hash(RObj) ->
-    erlang:phash2(RObj, 4294967296).
 
 %% @doc
 %% Prepare PUT needs to prepare the correct transition from old object to new
@@ -2571,27 +2916,35 @@ perform_put({true, {_Obj, _OldObj}=Objects},
                      bkey=BKey,
                      reqid=ReqID,
                      index_specs=IndexSpecs,
-                     readrepair=ReadRepair}) ->
+                     readrepair=ReadRepair,
+                     coord=Coord}) ->
     case ReadRepair of
       true ->
         MaxCheckFlag = no_max_check;
       false ->
         MaxCheckFlag = do_max_check
     end,
-    actual_put(BKey, Objects, IndexSpecs, RB, ReqID, MaxCheckFlag, State).
+    actual_put(BKey, Objects, IndexSpecs,
+                RB, ReqID, MaxCheckFlag, Coord, State).
 
 actual_put(BKey, {Obj, OldObj}, IndexSpecs, RB, ReqID, State) ->
-    actual_put(BKey, {Obj, OldObj}, IndexSpecs, RB, ReqID, do_max_check, State).
+    actual_put(BKey, {Obj, OldObj}, IndexSpecs,
+                RB, ReqID, do_max_check, false, State).
 
-actual_put(BKey={Bucket, Key}, {Obj, OldObj}, IndexSpecs, RB, ReqID, MaxCheckFlag,
-           State=#state{idx=Idx,
-                        mod=Mod,
-                        modstate=ModState,
-                        update_hook=UpdateHook}) ->
+actual_put(BKey={Bucket, Key}, {Obj, OldObj}, IndexSpecs,
+            RB, ReqID, MaxCheckFlag, Coord,
+            State=#state{idx=Idx,
+                            mod=Mod,
+                            modstate=ModState,
+                            update_hook=UpdateHook}) ->
     case encode_and_put(Obj, Mod, Bucket, Key, IndexSpecs, ModState,
                        MaxCheckFlag) of
         {{ok, UpdModState}, EncodedVal} ->
             aae_update(Bucket, Key, Obj, OldObj, EncodedVal, State),
+            nextgenrepl(Bucket, Key, Obj, size(EncodedVal),
+                        Coord,
+                        State#state.enable_nextgenreplsrc,
+                        State#state.sizelimit_nextgenreplsrc),
             maybe_cache_object(BKey, Obj, State),
             maybe_update(UpdateHook, {Obj, maybe_old_object(OldObj)}, put, Idx),
             Reply = case RB of
@@ -3021,7 +3374,7 @@ do_delete(BKey, State) ->
                         Delay when is_integer(Delay) ->
                             erlang:send_after(Delay, self(),
                                               {final_delete, BKey,
-                                               delete_hash(RObj)}),
+                                               riak_object:delete_hash(RObj)}),
                             %% Nothing checks these messages - will just reply
                             %% del for now until we can refactor.
                             {reply, {del, Idx, del_mode_delayed},
@@ -3040,7 +3393,6 @@ do_delete(BKey, State) ->
 do_fold(Fun, Acc0, Sender, ReqOpts, State=#state{async_folding=AsyncFolding,
                                                  mod=Mod,
                                                  modstate=ModState}) ->
-    lager:info("Fold request received ReqOpts ~w", [ReqOpts]),
     {ok, Capabilities} = Mod:capabilities(ModState),
     Opts0 = maybe_enable_async_fold(AsyncFolding, Capabilities, ReqOpts),
     Opts = maybe_enable_iterator_refresh(Capabilities, Opts0),
@@ -3089,19 +3441,19 @@ fold_type_for_query(Query) ->
 maybe_enable_async_fold(AsyncFolding, Capabilities, Opts) ->
     AsyncBackend = lists:member(async_fold, Capabilities),
     options_for_folding_and_backend(Opts,
-									AsyncFolding andalso AsyncBackend,
-									async_fold).
+                                    AsyncFolding andalso AsyncBackend,
+                                    async_fold).
 
 -spec maybe_enable_snap_prefold(boolean(), list(), list()) -> list().
 maybe_enable_snap_prefold(SnapFolding, Capabilities, Opts) ->
 	SnapBackend = lists:member(snap_prefold, Capabilities),
     options_for_folding_and_backend(Opts,
-									SnapFolding andalso SnapBackend,
-									snap_prefold).
+                                    SnapFolding andalso SnapBackend,
+                                    snap_prefold).
 
 -spec options_for_folding_and_backend(list(),
-										UseAsyncFolding :: boolean(),
-										atom()) -> list().
+                                        UseAsyncFolding :: boolean(),
+                                        atom()) -> list().
 options_for_folding_and_backend(Opts, true, async_fold) ->
     [async_fold | Opts];
 options_for_folding_and_backend(Opts, true, snap_prefold) ->
@@ -3201,6 +3553,40 @@ do_diffobj_put({Bucket, Key}=BKey, DiffObj,
     end.
 
 
+-spec nextgenrepl(riak_object:bucket(), riak_object:key(),
+                    riak_object:riak_object(),
+                    pos_integer(), boolean(), boolean(), non_neg_integer()) ->
+                        ok.
+nextgenrepl(Bucket, Key, Obj, Size, true, true, Limit) ->
+    % This is the co-ordinator of the PUT, and nextgenrepl is enabled - so
+    % cast this to the repl src.
+    ObjectFormat =
+        case riak_kv_util:is_x_deleted(Obj) of
+            true ->
+                % This object may be reaped by the vnode before the 
+                % sink attempts to fetch the tombstone from the vnode.
+                % So the tombstone should be placed on the queue
+                {tomb, Obj};
+            false ->
+                % Check the size of the object before pushing the
+                % object to the replication queue.  Larger objects
+                % will have only a reference pushed, and will need
+                % to be fetched.
+                case Size > Limit of
+                    true ->
+                        to_fetch;
+                    _ ->
+                        {object, Obj}
+                end
+        end,
+    riak_kv_replrtq_src:replrtq_coordput({Bucket,
+                                            Key,
+                                            riak_object:vclock(Obj),
+                                            ObjectFormat});
+nextgenrepl(_B, _K, _Obj, _Size, _Coord, _Enabled, _Limit) ->
+    ok.
+
+
 -spec aae_update(binary(), binary(),
                     riak_object:riak_object()|none|undefined|use_binary,
                     old_object(),
@@ -3210,8 +3596,14 @@ do_diffobj_put({Bucket, Key}=BKey, DiffObj,
 %% @doc
 %% Update both the AAE controller (tictac aae) and old school hashtree aae
 %% if either or both are enabled.
-aae_update(Bucket, Key, UpdObj, PrevObj, UpdObjBin, State) ->
-    case State#state.hashtrees of 
+aae_update(_Bucket, _Key, _UpdObj, _PrevObj, _UpdObjBin,
+            #state{hashtrees = HTs, tictac_aae = TAAE} = _State) 
+            when HTs == undefined, TAAE == false ->
+    ok;
+aae_update(Bucket, Key, UpdObj, PrevObj, UpdObjBin,
+            #state{hashtrees = HTs, tictac_aae = TAAE} = State) ->
+    Async = async_aae(State#state.aae_tokenbucket),
+    case HTs of 
         undefined ->
             ok;
         Trees ->
@@ -3222,9 +3614,9 @@ aae_update(Bucket, Key, UpdObj, PrevObj, UpdObjBin, State) ->
                     _ ->
                         UpdObj
                 end,
-            update_hashtree(Bucket, Key, RObj, Trees)
+            update_hashtree(Bucket, Key, RObj, Trees, Async)
     end,
-    case {State#state.tictac_aae, PrevObj} of 
+    case {TAAE, PrevObj} of 
         {false, _} ->
             ok;
         {_, unchanged_no_old_object} ->
@@ -3248,6 +3640,14 @@ aae_update(Bucket, Key, UpdObj, PrevObj, UpdObjBin, State) ->
                     _ ->
                         UpdObjBin
                 end,
+            case Async of
+                true ->
+                    ok;
+                false ->
+                    aae_controller:aae_ping(State#state.aae_controller,
+                                            os:timestamp(),
+                                            self())
+            end,
             aae_controller:aae_put(State#state.aae_controller, 
                                     IndexN, 
                                     Bucket, Key, 
@@ -3259,24 +3659,53 @@ aae_update(Bucket, Key, UpdObj, PrevObj, UpdObjBin, State) ->
 -spec aae_delete(binary(), binary(), old_object(), state()) -> ok.
 %% @doc
 %% Remove an item from the AAE store, where AAE has been enabled
-aae_delete(Bucket, Key, PrevObj, State) ->
-    case State#state.hashtrees of 
+aae_delete(_Bucket, _Key, _PrevObj,
+            #state{hashtrees = HTs, tictac_aae = TAAE} = _State) 
+            when HTs == undefined, TAAE == false ->
+    ok;
+aae_delete(Bucket, Key, PrevObj,
+            #state{hashtrees = HTs, tictac_aae = TAAE} = State) ->
+    Async = async_aae(State#state.aae_tokenbucket),
+    case HTs of 
         undefined ->
             ok;
         Trees ->
-            delete_from_hashtree(Bucket, Key, Trees)
+            delete_from_hashtree(Bucket, Key, Trees, Async)
     end,
-    case State#state.tictac_aae of 
+    case TAAE of 
         false ->
             ok;
         true ->
             PrevClock = get_clock(PrevObj),
             IndexN = riak_kv_util:get_index_n({Bucket, Key}),
+            case Async of
+                true ->
+                    ok;
+                false ->
+                    aae_controller:aae_ping(State#state.aae_controller,
+                                            os:timestamp(),
+                                            self())
+            end,
             aae_controller:aae_put(State#state.aae_controller, 
                                     IndexN, 
                                     Bucket, Key, 
                                     none, PrevClock, 
                                     <<>>)
+    end.
+
+%% @doc
+%% Normally should use an async aae call, unless using a token bucket when a
+%% non-async call may be requested (false) each time the bucket is empty 
+-spec async_aae(boolean()) -> boolean().
+async_aae(false) ->
+    true;
+async_aae(true) ->
+    case get_hashtree_token() of
+        true ->
+            true;
+        false ->
+            put(hashtree_tokens, max_hashtree_tokens()),
+            false
     end.
 
 
@@ -3307,39 +3736,37 @@ maybe_old_object(OldObject) ->
     OldObject.
 
 
--spec update_hashtree(binary(), binary(), riak_object:riak_object(), pid()) 
-                                                                        -> ok.
+-spec update_hashtree(binary(), binary(), riak_object:riak_object(), pid(),
+                        boolean()) -> ok.
 %% @doc
 %% Update hashtree based AAE when enabled.
 %% Note that this requires an object copy - the object has been converted from
 %% a binary before being sent to another pid.  Also, all information on the 
 %% object is ignored other than that necessary to hash the object.  There is 
 %% scope for greater efficiency here, even without moving to Tictac AAE
-update_hashtree(Bucket, Key, RObj, Trees) ->
+update_hashtree(Bucket, Key, RObj, Trees, Async) ->
     Items = [{object, {Bucket, Key}, RObj}],
-    case get_hashtree_token() of
+    case Async of
         true ->
             riak_kv_index_hashtree:async_insert(Items, [], Trees),
             ok;
         false ->
             riak_kv_index_hashtree:insert(Items, [], Trees),
-            put(hashtree_tokens, max_hashtree_tokens()),
             ok
     end.
 
 
--spec delete_from_hashtree(binary(), binary(), pid()) -> ok.
+-spec delete_from_hashtree(binary(), binary(), pid(), boolean()) -> ok.
 %% @doc
 %% Remove an object from the hashtree based AAE
-delete_from_hashtree(Bucket, Key, Trees)->
+delete_from_hashtree(Bucket, Key, Trees, Async)->
     Items = [{object, {Bucket, Key}}],
-    case get_hashtree_token() of
+    case Async of
         true ->
             riak_kv_index_hashtree:async_delete(Items, Trees),
             ok;
         false ->
             riak_kv_index_hashtree:delete(Items, Trees),
-            put(hashtree_tokens, max_hashtree_tokens()),
             ok
     end.
 
@@ -3701,6 +4128,7 @@ new_md_cache(VId) ->
     %% ordered set to make sure that the first key is the oldest
     %% term format is {TimeStamp, Key, ValueTuple}
     ets:new(MDCacheName, [ordered_set, {keypos,2}]).
+
 
 %% @private increment the per vnode coordinating put counter,
 %% flushing/leasing if needed
