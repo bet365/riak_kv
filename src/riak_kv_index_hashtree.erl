@@ -614,9 +614,9 @@ fold_keys(Partition, HashtreePid, Index, HasIndexTree) ->
     Opts = 
         case Version of 
             legacy ->
-                [aae_reconstruction, {iterator_refresh, true}, ignore_deletes_with_expiry];
+                [aae_reconstruction, {iterator_refresh, true}, not_found_expiring];
             _ ->
-                [aae_reconstruction, {iterator_refresh, true}, ignore_deletes_with_expiry, fold_heads]
+                [aae_reconstruction, {iterator_refresh, true}, not_found_expiring, fold_heads]
         end,
     Req =
         riak_core_util:make_fold_req(FoldFun, {0, {Limit, Wait}}, false, Opts),

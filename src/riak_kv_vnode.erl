@@ -744,7 +744,24 @@ init([Index]) ->
     WorkerPoolStrategy =
         app_helper:get_env(riak_kv, worker_pool_strategy),
 
-    case catch Mod:start(Index, Configuration) of
+    %% Check if this vnode is a fallback and disable backend reaping to preserve
+    %% deleted objects for when the primary is re-introduced to the cluster. If we
+    %% don't do this, the returning node may introduce stale data where it has
+    %% missed the original delete and the reaping threshold has elapsed, meaning
+    %% all replicas have reaped the object.
+    Configuration1 =
+        case fallback_disable_backend_reap(Index) of
+                 %% If we are a fallback, pass an option to the backend to disable 
+                 %% the expiring of keys. The expired_not_found option, when set
+                 %% to true, will honour existing expirations, even though we have 
+                 %% explicitly disabled the feature, and return not_found.
+                 true -> 
+                     [{tstamp_expire_enabled, false} | Configuration];
+                 false ->
+                     Configuration
+        end,
+
+    case catch Mod:start(Index, Configuration1) of
         {ok, ModState} ->
             %% Get the backend capabilities
             DoAsyncPut =  case app_helper:get_env(riak_kv, allow_async_put, true) of
@@ -1964,7 +1981,8 @@ handoff_starting({_HOType, TargetNode}=HandoffDest, State=#state{handoffs_reject
 handoff_started(SrcPartition, WorkerPid) ->
     case maybe_get_vnode_lock(SrcPartition, WorkerPid) of
         ok ->
-            FoldOpts = [{iterator_refresh, true}],
+            FoldOpts = [{iterator_refresh, true}, 
+                        {not_found_expired, false}],
             {ok, FoldOpts};
         max_concurrency -> {error, max_concurrency}
     end.
@@ -4036,6 +4054,20 @@ maybe_should_handoff(undefined, _HandoffDest) ->
     true;
 maybe_should_handoff(UpdateHook, HandoffDest) ->
     UpdateHook:should_handoff(HandoffDest).
+
+fallback_disable_backend_reap(Index) ->
+    case riak_kv_util:backend_reap_threshold() of
+        normal -> 
+            false;
+        _ -> 
+            {ok, Ring} = riak_core_ring_manager:get_my_ring(),
+            case riak_core_ring:vnode_type(Ring, Index) of
+                {fallback, _} -> 
+                    true;
+                _ -> 
+                    false
+            end
+    end.
 
 -ifdef(TEST).
 
