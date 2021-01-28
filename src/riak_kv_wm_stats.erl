@@ -74,7 +74,7 @@ forbidden(RD, Ctx) ->
     {riak_kv_wm_utils:is_forbidden(RD), RD, Ctx}.
 
 produce_body(ReqData, Ctx) ->
-    Stats= riak_kv_http_cache:get_stats(),
+    Stats= maybe_use_cached_stats(),
     Body = mochijson2:encode({struct, Stats}),
     {Body, ReqData, Ctx}.
 
@@ -88,3 +88,9 @@ pretty_print(RD1, C1=#ctx{}) ->
 
 get_stats() ->
     riak_kv_status:get_stats(web).
+
+maybe_use_cached_stats() ->
+    case application:get_env(riak_kv, disable_stats_cache, false) of
+        true -> get_stats();
+        _ -> riak_kv_http_cache:get_stats()
+    end.

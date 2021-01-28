@@ -49,7 +49,8 @@
          overload_reply/1,
          get_backend_config/3,
          is_modfun_allowed/2,
-         backend_reap_mode/1]).
+         backend_reap_mode/1,
+         backend_reap_threshold/0]).
 
 -export([report_hashtree_tokens/0, reset_hashtree_tokens/2]).
 
@@ -236,7 +237,7 @@ reset_hashtree_tokens(MinToken, MaxToken) when MaxToken >= MinToken ->
     ok.
 
 backend_reap_mode(Bucket) ->
-    case maybe_get_backend_reap_threshold() of
+    case backend_reap_threshold() of
         normal ->
             normal;
         BackendReap ->
@@ -258,16 +259,17 @@ backend_reap_mode(Bucket) ->
             end
     end.
 
-%% ===================================================================
-%% Helper functions for delete mode
-%% ===================================================================
-maybe_get_backend_reap_threshold() ->
+backend_reap_threshold() ->
     case app_helper:get_env(riak_kv, backend_reap_threshold, undefined) of
         undefined ->
             normal;
         BackendreapThreshold ->
             {backend_reap, BackendreapThreshold}
     end.
+
+%% ===================================================================
+%% Helper functions for delete mode
+%% ===================================================================
 
 check_backend_reap_module_capability() ->
     case app_helper:get_env(riak_kv, backend_reap_module_capability, undefined) of
