@@ -469,9 +469,11 @@ get_asyncopts(State, Bucket) ->
 
 %% API
 start_vnode(I) ->
+    lager:info("riak_kv_vnode start_vnode with INdex1: ~p~n", [I]),
     riak_core_vnode_master:get_vnode_pid(I, riak_kv_vnode).
 
 start_vnodes(IdxList) ->
+    lager:info("riak_kv_vnode start_vnode with INdex2: ~p~n", [IdxList]),
     riak_core_vnode_master:get_vnode_pid(IdxList, riak_kv_vnode).
 
 test_vnode(I) ->
@@ -543,6 +545,7 @@ put(Preflist, BKey, Obj, ReqId, StartTime, Options) when is_integer(StartTime) -
 
 put(Preflist, BKey, Obj, ReqId, StartTime, Options, Sender)
   when is_integer(StartTime) ->
+	lager:info("Starting put in vnode with preflist: ~p~n", [Preflist]),
     Req = riak_kv_requests:new_put_request(
         sanitize_bkey(BKey), Obj, ReqId, StartTime, Options),
     riak_core_vnode_master:command(Preflist,
@@ -586,6 +589,7 @@ refresh_index_data(Partition, BKey, IdxData, TimeOut) ->
 %% Issue a put for the object to the preflist, expecting a reply
 %% to an FSM.
 coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options) when is_integer(StartTime) ->
+	lager:info("coord_put IndexNode: ~p~n", [IndexNode]),
     coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options, {fsm, undefined, self()}).
 
 coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options, Sender)
@@ -712,6 +716,7 @@ reformat_object(Partition, BKey) ->
 %% VNode callbacks
 
 init([Index]) ->
+    lager:info("riak_kv_vnode init hit with index: ~p~n", [Index]),
     Mod = app_helper:get_env(riak_kv, storage_backend),
     Configuration = app_helper:get_env(riak_kv),
     BucketBufSize = app_helper:get_env(riak_kv, bucket_buffer_size, 1000),
@@ -744,6 +749,7 @@ init([Index]) ->
     WorkerPoolStrategy =
         app_helper:get_env(riak_kv, worker_pool_strategy),
 
+    lager:info("Calling bitcask start"),
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
@@ -771,6 +777,15 @@ init([Index]) ->
                            worker_pool_strategy=WorkerPoolStrategy,
                            update_hook=update_hook()},
             try_set_vnode_lock_limit(Index),
+            lager:info("Bitcask started"),
+			StartOldAAE = app_helper:get_env(riak_kv, old_aae_disable, true),
+			case StartOldAAE of
+				true ->
+					ok;
+				false ->
+					riak_kv_entropy_manager:disable()
+			end,
+			lager:info("Did old aae get disabled? Status: ~p~n", [riak_kv_entropy_manager:enabled()]),
             case AsyncFolding of
                 true ->
                     %% Create worker pool initialization tuple
